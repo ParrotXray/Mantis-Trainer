@@ -1,0 +1,50 @@
+name: Checker
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+  push:
+  workflow_dispatch:
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Cache pip packages
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip setuptools wheel
+        pip install black isort flake8
+
+    - name: Run Test Compile
+      run: |
+        python3 -m compileall .
+
+    - name: Check formatting with black
+      run: |
+        black --check src
+
+    - name: Check import sorting with isort
+      run: |
+        isort --check-only src
+
+    - name: Lint with flake8
+      run: |
+        flake8 src --count --select=E9,F63,F7,F82 --show-source --statistics
+        flake8 src --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
