@@ -453,6 +453,10 @@ class DeepAutoencoder:
             else 0
         )
 
+        ae_threshold = float(ae_mse_benign.mean() + 2 * ae_mse_benign.std())
+        fpr = float((ae_mse_benign > ae_threshold).sum() / len(ae_mse_benign))
+        tpr = float((ae_mse_attack > ae_threshold).sum() / len(ae_mse_attack))
+
         self.log.info(
             "\n".join(
                 [
@@ -460,6 +464,9 @@ class DeepAutoencoder:
                     f"Normal: Mean={ae_mse_benign.mean():.6f}, Median={np.median(ae_mse_benign):.6f}",
                     f"Attack: Mean={ae_mse_attack.mean():.6f}, Median={np.median(ae_mse_attack):.6f}",
                     f"Separation: {separation:.2f}x",
+                    f"Threshold (mean+2std): {ae_threshold:.6f}",
+                    f"FPR (AE stage): {fpr*100:.4f}%",
+                    f"TPR (AE stage): {tpr*100:.4f}%",
                 ]
             )
         )

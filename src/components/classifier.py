@@ -777,6 +777,16 @@ class Classifier:
         )
         self.log.info(f"\nClassification Report:\n  {report}")
 
+        # Per-class FPR (within attack-only test set)
+        cm = confusion_matrix(self.test_labels, self.predictions)
+        lines = ["\nPer-class FPR (within attack test set):"]
+        for i, cls in enumerate(self.label_encoder.classes_):
+            fp = cm[:, i].sum() - cm[i, i]
+            tn = cm.sum() - cm[i, :].sum() - cm[:, i].sum() + cm[i, i]
+            fpr = fp / (fp + tn) if (fp + tn) > 0 else 0.0
+            lines.append(f"  {cls:<35} {fpr*100:.4f}%")
+        self.log.info("\n".join(lines))
+
     # ------------------------------------------------------------------
     # Save results
     # ------------------------------------------------------------------
