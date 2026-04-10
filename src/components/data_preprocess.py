@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import ujson
 
-from model import UNIFIED_FEATURE_NAMES, DatasetConfig, PreprocessConfig
+from model import SEQUENCE_META_COLUMNS, UNIFIED_FEATURE_NAMES, DatasetConfig, PreprocessConfig
 from utils import Logger
 
 
@@ -182,7 +182,7 @@ class DataPreprocess:
             self.log.info("\n".join(lines))
 
     def feature_preparation(self) -> None:
-        """Extract unified feature matrix (27 features), NaN for missing."""
+        """Extract unified feature matrix (27 features + sequence metadata), NaN for missing."""
         if self.combined_data is None:
             raise ValueError("No combined data. Call load_datasets() first!")
 
@@ -220,13 +220,35 @@ class DataPreprocess:
                 mask, col
             ].clip(self.config.clip_min, self.config.clip_max)
 
-        n_total = self.feature_matrix.size
-        n_nan = self.feature_matrix.isna().sum().sum()
+        # Preserve sequence metadata — timestamp is converted to int64 unix-ms
+        # so that sort_values("timestamp") always produces correct temporal order
+        # regardless of the original string format used by each dataset.
+        for meta_col in SEQUENCE_META_COLUMNS:
+            if meta_col not in self.combined_data.columns:
+                continue
+            if meta_col == "timestamp":
+                ts = pd.to_datetime(
+                    self.combined_data[meta_col], infer_datetime_format=True, errors="coerce"
+                )
+                # Store as integer milliseconds; NaT → -1 (sorts to front, harmless)
+                self.feature_matrix[meta_col] = (
+                    ts.astype("int64") // 1_000_000
+                ).where(ts.notna(), other=-1)
+            else:
+                self.feature_matrix[meta_col] = self.combined_data[meta_col].values
+
+        n_feature_cols = len(UNIFIED_FEATURE_NAMES)
+        n_total = self.feature_matrix[UNIFIED_FEATURE_NAMES].size
+        n_nan = self.feature_matrix[UNIFIED_FEATURE_NAMES].isna().sum().sum()
         pct_nan = n_nan / n_total * 100 if n_total > 0 else 0
+        meta_present = [c for c in SEQUENCE_META_COLUMNS if c in self.feature_matrix.columns]
         self.log.info(
-            f"Feature matrix: {self.feature_matrix.shape}, "
+            f"Feature matrix: {self.feature_matrix.shape} "
+            f"({n_feature_cols} flow features + {len(meta_present)} metadata cols), "
             f"NaN: {n_nan:,} ({pct_nan:.1f}%)"
         )
+        if meta_present:
+            self.log.info(f"Sequence metadata preserved: {meta_present}")
 
     def output_result(self) -> None:
         """Save preprocessed data: benign and attack CSVs."""

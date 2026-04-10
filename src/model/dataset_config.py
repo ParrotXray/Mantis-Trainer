@@ -13,6 +13,11 @@ logger = Logger(__name__)
 # Unified feature schema
 # ---------------------------------------------------------------------------
 
+# Metadata columns preserved alongside features for temporal sequencing.
+# These are NOT model inputs; they are used to group flows by source IP and
+# sort them by time before the sliding-window step.
+SEQUENCE_META_COLUMNS: Final[List[str]] = ["timestamp", "src_ip"]
+
 UNIFIED_FEATURE_NAMES: Final[List[str]] = [
     "flow_duration",
     "fwd_packets",
@@ -154,6 +159,10 @@ CIC_2019_CONFIG: Final[DatasetConfig] = DatasetConfig(
         "Bwd Packet Length Std": "bwd_pkt_len_std",
         "min_seg_size_forward": "fwd_seg_size_min",
         "act_data_pkt_fwd": "fwd_act_data_pkts",
+        # Sequence metadata
+        "Timestamp": "timestamp",
+        "Src IP": "src_ip",
+        "Source IP": "src_ip",
     },
 )
 
@@ -235,6 +244,10 @@ CIC_2018_CONFIG: Final[DatasetConfig] = DatasetConfig(
         "Bwd Pkt Len Std": "bwd_pkt_len_std",
         "Fwd Seg Size Min": "fwd_seg_size_min",
         "Fwd Act Data Pkts": "fwd_act_data_pkts",
+        # Sequence metadata
+        "Timestamp": "timestamp",
+        "Src IP": "src_ip",
+        "Source IP": "src_ip",
     },
 )
 
@@ -290,6 +303,10 @@ CIC_DOS2017_CONFIG: Final[DatasetConfig] = DatasetConfig(
         "Bwd Pkt Len Std": "bwd_pkt_len_std",
         "Fwd Seg Size Min": "fwd_seg_size_min",
         "Fwd Act Data Pkts": "fwd_act_data_pkts",
+        # Sequence metadata
+        "Timestamp": "timestamp",
+        "Src IP": "src_ip",
+        "Source IP": "src_ip",
     },
 )
 
@@ -359,6 +376,10 @@ CIC_2017_CONFIG: Final[DatasetConfig] = DatasetConfig(
         "Bwd Packet Length Std": "bwd_pkt_len_std",
         "min_seg_size_forward": "fwd_seg_size_min",
         "act_data_pkt_fwd": "fwd_act_data_pkts",
+        # Sequence metadata
+        "Timestamp": "timestamp",
+        "Src IP": "src_ip",
+        "Source IP": "src_ip",
     },
 )
 
@@ -448,6 +469,10 @@ CIC_UNSW_NB15_CONFIG: Final[DatasetConfig] = DatasetConfig(
         "Bwd Pkt Len Std": "bwd_pkt_len_std",
         "Fwd Seg Size Min": "fwd_seg_size_min",
         "Fwd Act Data Pkts": "fwd_act_data_pkts",
+        # Sequence metadata
+        "Timestamp": "timestamp",
+        "Src IP": "src_ip",
+        "Source IP": "src_ip",
     },
 )
 
@@ -517,6 +542,10 @@ LAB_301_CONFIG: Final[DatasetConfig] = DatasetConfig(
         "Bwd Packet Length Std": "bwd_pkt_len_std",
         "min_seg_size_forward": "fwd_seg_size_min",
         "act_data_pkt_fwd": "fwd_act_data_pkts",
+        # Sequence metadata
+        "Timestamp": "timestamp",
+        "Src IP": "src_ip",
+        "Source IP": "src_ip",
     },
 )
 
