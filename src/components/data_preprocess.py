@@ -6,7 +6,12 @@ import numpy as np
 import pandas as pd
 import ujson
 
-from model import SEQUENCE_META_COLUMNS, UNIFIED_FEATURE_NAMES, DatasetConfig, PreprocessConfig
+from model import (
+    SEQUENCE_META_COLUMNS,
+    UNIFIED_FEATURE_NAMES,
+    DatasetConfig,
+    PreprocessConfig,
+)
 from utils import Logger
 
 
@@ -228,12 +233,14 @@ class DataPreprocess:
                 continue
             if meta_col == "timestamp":
                 ts = pd.to_datetime(
-                    self.combined_data[meta_col], infer_datetime_format=True, errors="coerce"
+                    self.combined_data[meta_col],
+                    infer_datetime_format=True,
+                    errors="coerce",
                 )
                 # Store as integer milliseconds; NaT → -1 (sorts to front, harmless)
-                self.feature_matrix[meta_col] = (
-                    ts.astype("int64") // 1_000_000
-                ).where(ts.notna(), other=-1)
+                self.feature_matrix[meta_col] = (ts.astype("int64") // 1_000_000).where(
+                    ts.notna(), other=-1
+                )
             else:
                 self.feature_matrix[meta_col] = self.combined_data[meta_col].values
 
@@ -241,7 +248,9 @@ class DataPreprocess:
         n_total = self.feature_matrix[UNIFIED_FEATURE_NAMES].size
         n_nan = self.feature_matrix[UNIFIED_FEATURE_NAMES].isna().sum().sum()
         pct_nan = n_nan / n_total * 100 if n_total > 0 else 0
-        meta_present = [c for c in SEQUENCE_META_COLUMNS if c in self.feature_matrix.columns]
+        meta_present = [
+            c for c in SEQUENCE_META_COLUMNS if c in self.feature_matrix.columns
+        ]
         self.log.info(
             f"Feature matrix: {self.feature_matrix.shape} "
             f"({n_feature_cols} flow features + {len(meta_present)} metadata cols), "

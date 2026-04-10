@@ -63,7 +63,10 @@ Available datasets: {', '.join(available)}
         "-dp", "--datapreprocess", action="store_true", help="Data preprocessing"
     )
     parser.add_argument(
-        "-da", "--deepautoencoder", action="store_true", help="Train LSTM Deep Autoencoder"
+        "-da",
+        "--deepautoencoder",
+        action="store_true",
+        help="Train LSTM Deep Autoencoder",
     )
     parser.add_argument(
         "-ep", "--export", action="store_true", help="Export models to ONNX"

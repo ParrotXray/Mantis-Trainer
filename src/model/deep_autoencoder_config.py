@@ -11,8 +11,8 @@ class DeepAutoencoderConfig:
     fill_value: float = 0.0
 
     # Sequence Parameters
-    window_size: int = 10   # number of consecutive flows per sequence
-    stride: int = 1         # sliding-window step (training)
+    window_size: int = 10  # number of consecutive flows per sequence
+    stride: int = 1  # sliding-window step (training)
 
     # LSTM Architecture Parameters
     hidden_size: int = 128

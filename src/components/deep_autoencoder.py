@@ -145,7 +145,9 @@ class LSTMAutoencoderLightningModule(L.LightningModule):
         self.log("train_mae", mae, prog_bar=False, on_step=False, on_epoch=True)
         return loss
 
-    def validation_step(self, batch: Tuple[torch.Tensor], batch_idx: int) -> torch.Tensor:
+    def validation_step(
+        self, batch: Tuple[torch.Tensor], batch_idx: int
+    ) -> torch.Tensor:
         x = batch[0]
         x_hat = self(x)
         loss = self.loss_fn(x_hat, x)
@@ -212,11 +214,11 @@ def _make_train_sequences(
             positions = group_sorted["_pos"].values
             n = len(positions)
             for start in range(0, n - window_size + 1, stride):
-                sequences.append(scaled[positions[start: start + window_size]])
+                sequences.append(scaled[positions[start : start + window_size]])
     else:
         n = len(scaled)
         for start in range(0, n - window_size + 1, stride):
-            sequences.append(scaled[start: start + window_size])
+            sequences.append(scaled[start : start + window_size])
 
     if not sequences:
         return np.empty((0, window_size, n_features), dtype=np.float32)
@@ -254,14 +256,14 @@ def _make_per_flow_sequences(
             positions = group_sorted["_pos"].values
             for k, pos in enumerate(positions):
                 start_in_group = max(0, k + 1 - window_size)
-                window_pos = positions[start_in_group: k + 1]
+                window_pos = positions[start_in_group : k + 1]
                 pad_len = window_size - len(window_pos)
                 sequences[pos, pad_len:] = scaled[window_pos]
     else:
         for i in range(n_flows):
             start = max(0, i + 1 - window_size)
             pad_len = window_size - (i + 1 - start)
-            sequences[i, pad_len:] = scaled[start: i + 1]
+            sequences[i, pad_len:] = scaled[start : i + 1]
 
     return sequences
 
@@ -282,7 +284,7 @@ class DeepAutoencoder:
         # DataFrames carrying both features + metadata (src_ip, timestamp)
         self.benign_train: Optional[pd.DataFrame] = None
         self.benign_val: Optional[pd.DataFrame] = None
-        self.test_df: Optional[pd.DataFrame] = None   # features + meta
+        self.test_df: Optional[pd.DataFrame] = None  # features + meta
 
         # Binary / original labels for the test set
         self.test_labels: Optional[pd.Series] = None
@@ -359,9 +361,7 @@ class DeepAutoencoder:
         # Report metadata availability
         has_ts = "timestamp" in self.benign_data.columns
         has_ip = "src_ip" in self.benign_data.columns
-        self.log.info(
-            f"Sequence metadata — timestamp: {has_ts}, src_ip: {has_ip}"
-        )
+        self.log.info(f"Sequence metadata — timestamp: {has_ts}, src_ip: {has_ip}")
 
     def prepare_data(self) -> None:
         self.log.info("Preparing data...")
@@ -376,9 +376,7 @@ class DeepAutoencoder:
         )
 
         # ---- collect metadata columns present in the data ----
-        meta_cols = [
-            c for c in SEQUENCE_META_COLUMNS if c in self.benign_data.columns
-        ]
+        meta_cols = [c for c in SEQUENCE_META_COLUMNS if c in self.benign_data.columns]
 
         all_cols = available_features + meta_cols
 
@@ -487,9 +485,7 @@ class DeepAutoencoder:
         """
         W = self.config.window_size
         S = self.config.stride
-        self.log.info(
-            f"Building sequences — window_size={W}, stride={S} (training)"
-        )
+        self.log.info(f"Building sequences — window_size={W}, stride={S} (training)")
 
         self.train_sequences = _make_train_sequences(
             self.benign_train, self.benign_train_scaled, W, S
@@ -613,12 +609,8 @@ class DeepAutoencoder:
             )
             self.log.info(f"Loaded best model from {best_model_path}")
 
-        self.log.info(
-            f"Training completed: {trainer.current_epoch + 1} epochs"
-        )
-        self.log.info(
-            f"Best validation loss: {callbacks[1].best_model_score:.6f}"
-        )
+        self.log.info(f"Training completed: {trainer.current_epoch + 1} epochs")
+        self.log.info(f"Best validation loss: {callbacks[1].best_model_score:.6f}")
 
     def predict_autoencoder(self) -> None:
         """
@@ -666,7 +658,9 @@ class DeepAutoencoder:
             thresh = float(np.percentile(ae_mse_benign, percentile))
             fpr_p = float((ae_mse_benign > thresh).sum() / len(ae_mse_benign))
             tpr_p = float((ae_mse_attack > thresh).sum() / len(ae_mse_attack))
-            lines.append(f"{percentile:<12} {thresh:<12.4f} {fpr_p*100:<10.2f}% {tpr_p*100:<10.2f}%")
+            lines.append(
+                f"{percentile:<12} {thresh:<12.4f} {fpr_p*100:<10.2f}% {tpr_p*100:<10.2f}%"
+            )
             thresholds[str(percentile)] = thresh
 
         for name, expr in [
@@ -676,7 +670,9 @@ class DeepAutoencoder:
             thresh = float(expr)
             fpr_p = float((ae_mse_benign > thresh).sum() / len(ae_mse_benign))
             tpr_p = float((ae_mse_attack > thresh).sum() / len(ae_mse_attack))
-            lines.append(f"{name:<12} {thresh:<12.4f} {fpr_p*100:<10.2f}% {tpr_p*100:<10.2f}%")
+            lines.append(
+                f"{name:<12} {thresh:<12.4f} {fpr_p*100:<10.2f}% {tpr_p*100:<10.2f}%"
+            )
             thresholds[name] = thresh
 
         self.log.info("\n".join(lines))
