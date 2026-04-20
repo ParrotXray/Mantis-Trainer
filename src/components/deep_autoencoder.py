@@ -301,6 +301,7 @@ class DeepAutoencoder:
 
         # Per-flow anomaly scores on the test set
         self.ae_mse_scores: Optional[np.ndarray] = None
+        self.ae_threshold: Optional[float] = None
 
         self.scaler: Optional[StandardScaler] = None
         self.clip_params: Optional[Dict[str, Dict[str, float]]] = None
@@ -626,6 +627,18 @@ class DeepAutoencoder:
             f"({len(self.test_df):,} flows)..."
         )
 
+        val_seqs = _make_per_flow_sequences(
+            self.benign_val,
+            self.benign_val_scaled,
+            self.config.window_size,
+        )
+        val_scores = self._ae_predict_mse(val_seqs)
+        self.ae_threshold = float(val_scores.mean() + val_scores.std())
+        self.log.info(
+            f"Validation threshold (mean+1σ): {self.ae_threshold:.6f}"
+            f"\n  val mean={val_scores.mean():.6f}, std={val_scores.std():.6f}"
+        )
+
         per_flow_seqs = _make_per_flow_sequences(
             self.test_df,
             self.test_features_scaled,
@@ -732,7 +745,8 @@ class DeepAutoencoder:
         attack_mask = self.test_labels.values == 1
 
         output = pd.DataFrame(
-            self.test_features_scaled[attack_mask],
+            # self.test_features_scaled[attack_mask],
+            self.test_df[self._feature_cols].values[attack_mask],
             columns=self._feature_cols,
         )
         output["ae_anomaly_score"] = self.ae_mse_scores[attack_mask]
@@ -745,9 +759,9 @@ class DeepAutoencoder:
         )
 
         normal_scores = self.ae_mse_scores[self.test_labels == 0]
-        ae_threshold = float(normal_scores.mean() + 2 * normal_scores.std())
+        ae_threshold = self.ae_threshold or float(normal_scores.mean() + 1 * normal_scores.std())
         self.log.info(
-            f"\nAE threshold (mean+2σ): {ae_threshold:.6f}"
+            f"\nAE threshold (mean+1σ): {ae_threshold:.6f}"
             f"\n  benign test mean={normal_scores.mean():.6f}, "
             f"std={normal_scores.std():.6f}"
         )
@@ -919,13 +933,13 @@ class DeepAutoencoder:
             cdf = np.arange(1, len(sorted_s) + 1) / len(sorted_s)
             ax.plot(sorted_s, cdf, label=label, color=color, lw=2)
 
-        threshold = float(normal_scores.mean() + 2 * normal_scores.std())
+        threshold = self.ae_threshold or float(normal_scores.mean() + 1 * normal_scores.std()) 
         ax.axvline(
             threshold,
             color="navy",
             linestyle="--",
             lw=1.5,
-            label=f"Threshold (mean+2σ) = {threshold:.4f}",
+            label=f"Threshold (mean+1σ) = {threshold:.4f}",
         )
         ax.set_xlabel("LSTM AE MSE Score")
         ax.set_ylabel("CDF")
