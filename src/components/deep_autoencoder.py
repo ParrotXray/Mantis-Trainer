@@ -94,18 +94,13 @@ class LSTMAutoencoderModel(nn.Module):
         )  # (batch, seq_len, encoding_dim)
 
         # Initialise decoder hidden state from bottleneck
-        # h_0 = (
-        #     self.decoder_fc(encoded)
-        #     .unsqueeze(0)
-        #     .expand(self.num_layers, batch_size, self.hidden_size)
-        #     .contiguous()
-        # )
-        # c_0 = torch.zeros_like(h_0)
-
-        h_0 = self.decoder_fc(encoded).unsqueeze(0).repeat(self.num_layers, 1, 1)
-        c_0 = torch.zeros(
-            self.num_layers, batch_size, self.hidden_size, device=x.device
+        h_0 = (
+            self.decoder_fc(encoded)
+            .unsqueeze(0)
+            .expand(self.num_layers, batch_size, self.hidden_size)
+            .contiguous()
         )
+        c_0 = torch.zeros_like(h_0)
 
         decoder_out, _ = self.decoder_lstm(
             decoder_input, (h_0, c_0)
@@ -663,9 +658,10 @@ class DeepAutoencoder:
         attack_scores = self.ae_mse_scores[attack_mask]
         attack_labels = self.test_labels_orig[attack_mask]
 
-        # Build all threshold candidates from val set (percentile 90-99, mean+2std, mean+1std)
         candidate_names = [str(p) for p in range(90, 100)] + ["mean+2std", "mean+1std"]
-        candidate_values = np.array(
+
+        # Val set candidates → used for threshold selection and export
+        val_candidate_values = np.array(
             [float(np.percentile(val_scores, p)) for p in range(90, 100)]
             + [
                 float(val_scores.mean() + 2 * val_scores.std()),
@@ -673,34 +669,64 @@ class DeepAutoencoder:
             ]
         )
 
-        fpr_arr = np.array([(ae_mse_benign > t).mean() for t in candidate_values])
-        tpr_arr = np.array([(ae_mse_attack > t).mean() for t in candidate_values])
-        youden_arr = tpr_arr - fpr_arr
+        # Test set candidates → for evaluation/comparison only
+        test_candidate_values = np.array(
+            [float(np.percentile(ae_mse_benign, p)) for p in range(90, 100)]
+            + [
+                float(ae_mse_benign.mean() + 2 * ae_mse_benign.std()),
+                float(ae_mse_benign.mean() + 1 * ae_mse_benign.std()),
+            ]
+        )
 
-        best_idx = int(np.argmax(youden_arr))
-        self.ae_threshold = float(candidate_values[best_idx])
+        val_fpr = np.array([(ae_mse_benign > t).mean() for t in val_candidate_values])
+        val_tpr = np.array([(ae_mse_attack > t).mean() for t in val_candidate_values])
+        val_youden = val_tpr - val_fpr
+
+        test_fpr = np.array([(ae_mse_benign > t).mean() for t in test_candidate_values])
+        test_tpr = np.array([(ae_mse_attack > t).mean() for t in test_candidate_values])
+        test_youden = test_tpr - test_fpr
+
+        best_idx = int(np.argmax(val_youden))
+        self.ae_threshold = float(val_candidate_values[best_idx])
         self.ae_threshold_method = candidate_names[best_idx]
 
-        # Threshold analysis table
-        lines = ["\nThreshold Analysis:"]
+        # Threshold analysis table (val set candidates)
+        lines = [
+            "\nThreshold Analysis [Val Set Candidates] (exported threshold from this section):"
+        ]
         lines.append(
             f"{'Name':<12} {'Threshold':<12} {'FPR':<10} {'TPR':<10} {'Youden':<10}"
         )
         lines.append("-" * 54)
         for name, thresh, fpr_p, tpr_p, youden in zip(
-            candidate_names, candidate_values, fpr_arr, tpr_arr, youden_arr
+            candidate_names, val_candidate_values, val_fpr, val_tpr, val_youden
         ):
             marker = " <-- best" if name == candidate_names[best_idx] else ""
             lines.append(
                 f"{name:<12} {thresh:<12.4f} {fpr_p*100:<10.2f}% {tpr_p*100:<10.2f}% {youden:<10.4f}{marker}"
             )
-        self.log.info("\n".join(lines))
-        self.log.info(
-            f"Best threshold selected: {candidate_names[best_idx]} = {self.ae_threshold:.6f} "
-            f"(Youden={youden_arr[best_idx]:.4f})"
+        lines.append(
+            f"\nBest: {candidate_names[best_idx]} = {self.ae_threshold:.6f} (Youden={val_youden[best_idx]:.4f})"
         )
+        self.log.info("\n".join(lines))
 
-        thresholds = dict(zip(candidate_names, candidate_values.tolist()))
+        # Threshold analysis table (test set candidates, evaluation only)
+        lines = [
+            "\nThreshold Analysis [Test Set Candidates] (evaluation reference only):"
+        ]
+        lines.append(
+            f"{'Name':<12} {'Threshold':<12} {'FPR':<10} {'TPR':<10} {'Youden':<10}"
+        )
+        lines.append("-" * 54)
+        for name, thresh, fpr_p, tpr_p, youden in zip(
+            candidate_names, test_candidate_values, test_fpr, test_tpr, test_youden
+        ):
+            lines.append(
+                f"{name:<12} {thresh:<12.4f} {fpr_p*100:<10.2f}% {tpr_p*100:<10.2f}% {youden:<10.4f}"
+            )
+        self.log.info("\n".join(lines))
+
+        thresholds = dict(zip(candidate_names, test_candidate_values.tolist()))
 
         # Per-class TPR for each threshold
         for name, threshold in thresholds.items():
@@ -770,14 +796,8 @@ class DeepAutoencoder:
             f"Saved: {output_path} ({len(output):,} rows, {output.shape[1]} columns)"
         )
 
-        normal_scores = self.ae_mse_scores[self.test_labels == 0]
-        ae_threshold = self.ae_threshold or float(
-            normal_scores.mean() + 1 * normal_scores.std()
-        )
         self.log.info(
-            f"\nAE threshold (best Youden): {ae_threshold:.6f}"
-            f"\n  benign test mean={normal_scores.mean():.6f}, "
-            f"std={normal_scores.std():.6f}"
+            f"\nAE threshold (val set, {self.ae_threshold_method}): {self.ae_threshold:.6f}"
         )
 
         # ---- save PyTorch checkpoint ----
@@ -803,8 +823,8 @@ class DeepAutoencoder:
             "encoding_dim": self.config.encoding_dim,
             "window_size": self.config.window_size,
             "feature_names": self._feature_cols,
-            "ae_threshold": ae_threshold,
-            "ae_threshold_method": getattr(self, "ae_threshold_method", "mean+1std"),
+            "ae_threshold": self.ae_threshold,
+            "ae_threshold_method": self.ae_threshold_method,
         }
         config_path = Path("artifacts") / "deep_ae_config.pkl"
         joblib.dump(config_data, config_path)
