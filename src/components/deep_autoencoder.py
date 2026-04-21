@@ -94,13 +94,18 @@ class LSTMAutoencoderModel(nn.Module):
         )  # (batch, seq_len, encoding_dim)
 
         # Initialise decoder hidden state from bottleneck
-        h_0 = (
-            self.decoder_fc(encoded)
-            .unsqueeze(0)
-            .expand(self.num_layers, batch_size, self.hidden_size)
-            .contiguous()
+        # h_0 = (
+        #     self.decoder_fc(encoded)
+        #     .unsqueeze(0)
+        #     .expand(self.num_layers, batch_size, self.hidden_size)
+        #     .contiguous()
+        # )
+        # c_0 = torch.zeros_like(h_0)
+
+        h_0 = self.decoder_fc(encoded).unsqueeze(0).repeat(self.num_layers, 1, 1)
+        c_0 = torch.zeros(
+            self.num_layers, batch_size, self.hidden_size, device=x.device
         )
-        c_0 = torch.zeros_like(h_0)
 
         decoder_out, _ = self.decoder_lstm(
             decoder_input, (h_0, c_0)
@@ -633,10 +638,8 @@ class DeepAutoencoder:
             self.config.window_size,
         )
         val_scores = self._ae_predict_mse(val_seqs)
-        self.ae_threshold = float(val_scores.mean() + val_scores.std())
         self.log.info(
-            f"Validation threshold (mean+1σ): {self.ae_threshold:.6f}"
-            f"\n  val mean={val_scores.mean():.6f}, std={val_scores.std():.6f}"
+            f"Validation scores — mean={val_scores.mean():.6f}, std={val_scores.std():.6f}"
         )
 
         per_flow_seqs = _make_per_flow_sequences(
@@ -656,39 +659,48 @@ class DeepAutoencoder:
             else 0
         )
 
-        # Threshold analysis table
-        lines = ["\nThreshold Analysis:"]
-        lines.append(f"{'Percentile':<12} {'Threshold':<12} {'FPR':<10} {'TPR':<10}")
-        lines.append("-" * 44)
-
         attack_mask = self.test_labels == 1
         attack_scores = self.ae_mse_scores[attack_mask]
         attack_labels = self.test_labels_orig[attack_mask]
 
-        thresholds = {}
+        # Build all threshold candidates from val set (percentile 90-99, mean+2std, mean+1std)
+        candidate_names = [str(p) for p in range(90, 100)] + ["mean+2std", "mean+1std"]
+        candidate_values = np.array(
+            [float(np.percentile(val_scores, p)) for p in range(90, 100)]
+            + [
+                float(val_scores.mean() + 2 * val_scores.std()),
+                float(val_scores.mean() + 1 * val_scores.std()),
+            ]
+        )
 
-        for percentile in [90, 91, 92, 93, 94, 95, 96, 97, 98, 99]:
-            thresh = float(np.percentile(ae_mse_benign, percentile))
-            fpr_p = float((ae_mse_benign > thresh).sum() / len(ae_mse_benign))
-            tpr_p = float((ae_mse_attack > thresh).sum() / len(ae_mse_attack))
+        fpr_arr = np.array([(ae_mse_benign > t).mean() for t in candidate_values])
+        tpr_arr = np.array([(ae_mse_attack > t).mean() for t in candidate_values])
+        youden_arr = tpr_arr - fpr_arr
+
+        best_idx = int(np.argmax(youden_arr))
+        self.ae_threshold = float(candidate_values[best_idx])
+        self.ae_threshold_method = candidate_names[best_idx]
+
+        # Threshold analysis table
+        lines = ["\nThreshold Analysis:"]
+        lines.append(
+            f"{'Name':<12} {'Threshold':<12} {'FPR':<10} {'TPR':<10} {'Youden':<10}"
+        )
+        lines.append("-" * 54)
+        for name, thresh, fpr_p, tpr_p, youden in zip(
+            candidate_names, candidate_values, fpr_arr, tpr_arr, youden_arr
+        ):
+            marker = " <-- best" if name == candidate_names[best_idx] else ""
             lines.append(
-                f"{percentile:<12} {thresh:<12.4f} {fpr_p*100:<10.2f}% {tpr_p*100:<10.2f}%"
+                f"{name:<12} {thresh:<12.4f} {fpr_p*100:<10.2f}% {tpr_p*100:<10.2f}% {youden:<10.4f}{marker}"
             )
-            thresholds[str(percentile)] = thresh
-
-        for name, expr in [
-            ("mean+2std", ae_mse_benign.mean() + 2 * ae_mse_benign.std()),
-            ("mean+1std", ae_mse_benign.mean() + 1 * ae_mse_benign.std()),
-        ]:
-            thresh = float(expr)
-            fpr_p = float((ae_mse_benign > thresh).sum() / len(ae_mse_benign))
-            tpr_p = float((ae_mse_attack > thresh).sum() / len(ae_mse_attack))
-            lines.append(
-                f"{name:<12} {thresh:<12.4f} {fpr_p*100:<10.2f}% {tpr_p*100:<10.2f}%"
-            )
-            thresholds[name] = thresh
-
         self.log.info("\n".join(lines))
+        self.log.info(
+            f"Best threshold selected: {candidate_names[best_idx]} = {self.ae_threshold:.6f} "
+            f"(Youden={youden_arr[best_idx]:.4f})"
+        )
+
+        thresholds = dict(zip(candidate_names, candidate_values.tolist()))
 
         # Per-class TPR for each threshold
         for name, threshold in thresholds.items():
@@ -759,9 +771,11 @@ class DeepAutoencoder:
         )
 
         normal_scores = self.ae_mse_scores[self.test_labels == 0]
-        ae_threshold = self.ae_threshold or float(normal_scores.mean() + 1 * normal_scores.std())
+        ae_threshold = self.ae_threshold or float(
+            normal_scores.mean() + 1 * normal_scores.std()
+        )
         self.log.info(
-            f"\nAE threshold (mean+1σ): {ae_threshold:.6f}"
+            f"\nAE threshold (best Youden): {ae_threshold:.6f}"
             f"\n  benign test mean={normal_scores.mean():.6f}, "
             f"std={normal_scores.std():.6f}"
         )
@@ -790,6 +804,7 @@ class DeepAutoencoder:
             "window_size": self.config.window_size,
             "feature_names": self._feature_cols,
             "ae_threshold": ae_threshold,
+            "ae_threshold_method": getattr(self, "ae_threshold_method", "mean+1std"),
         }
         config_path = Path("artifacts") / "deep_ae_config.pkl"
         joblib.dump(config_data, config_path)
@@ -933,7 +948,9 @@ class DeepAutoencoder:
             cdf = np.arange(1, len(sorted_s) + 1) / len(sorted_s)
             ax.plot(sorted_s, cdf, label=label, color=color, lw=2)
 
-        threshold = self.ae_threshold or float(normal_scores.mean() + 1 * normal_scores.std()) 
+        threshold = self.ae_threshold or float(
+            normal_scores.mean() + 1 * normal_scores.std()
+        )
         ax.axvline(
             threshold,
             color="navy",

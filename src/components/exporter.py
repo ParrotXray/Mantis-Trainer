@@ -23,6 +23,7 @@ class Exporter:
         self.ae_scaler: Optional[Any] = None
         self.ae_clip_params: Optional[Dict[str, Dict[str, float]]] = None
         self.ae_threshold: Optional[float] = None
+        self.ae_threshold_method: Optional[str] = None
         self.feature_names: Optional[List[str]] = None
         self.encoding_dim: Optional[int] = None
         self.window_size: Optional[int] = None
@@ -89,6 +90,7 @@ class Exporter:
             self.encoding_dim = ae_config.get("encoding_dim", 32)
             self.feature_names = ae_config.get("feature_names", UNIFIED_FEATURE_NAMES)
             self.ae_threshold = ae_config.get("ae_threshold", 0.08)
+            self.ae_threshold_method = ae_config.get("ae_threshold_method", "mean+1std")
             self.window_size = ae_config.get("window_size", self.window_size or 10)
             self.log.info(
                 f"AE config loaded ({len(self.feature_names)} features, "
@@ -156,6 +158,7 @@ class Exporter:
                     "window_size": int(self.window_size),
                     "ae_feature_names": self.feature_names,
                     "ae_threshold": self.ae_threshold,
+                    "ae_threshold_method": self.ae_threshold_method,
                 },
             },
             "preprocessing": {
@@ -176,6 +179,7 @@ class Exporter:
             "ae_post_clip_min": self.config.post_scaling_clip_min,
             "ae_post_clip_max": self.config.post_scaling_clip_max,
             "ae_threshold": self.ae_threshold,
+            "ae_threshold_method": self.ae_threshold_method,
             "window_size": int(self.window_size),
         }
 

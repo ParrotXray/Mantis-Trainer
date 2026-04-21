@@ -97,6 +97,7 @@ class DatasetConfig:
         labels = labels.replace(self.label_mapping)
         return labels
 
+
 # ---------------------------------------------------------------------------
 # CIC-UNSW-NB15 (Augmented — re-extracted with CICFlowMeter)
 # ---------------------------------------------------------------------------
@@ -298,7 +299,6 @@ CIC_TEST_CONFIG: Final[DatasetConfig] = DatasetConfig(
         "Heartbleed": "Exploitation",
         "PortScan": "Reconnaissance",
         "Bot": "Exploitation",
-
         "slowheaders": "DoS",
         "ddossim": "DDoS",
         "slowread": "DoS",

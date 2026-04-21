@@ -6,7 +6,12 @@ import numpy as np
 import pandas as pd
 import ujson
 
-from model import SEQUENCE_META_COLUMNS, UNIFIED_FEATURE_NAMES, DatasetConfig, PreprocessConfig
+from model import (
+    SEQUENCE_META_COLUMNS,
+    UNIFIED_FEATURE_NAMES,
+    DatasetConfig,
+    PreprocessConfig,
+)
 from utils import Logger
 
 
@@ -41,17 +46,17 @@ class DataPreprocess:
     # Explicit format list covers all known CIC/UNSW dataset variants.
     # Tried in order; first one where >50% of values parse is used.
     _TS_FORMATS: Final[List[str]] = [
-        "%Y/%m/%d %H:%M:%S",    # 2010/6/12 03:01:06
-        "%Y/%m/%d %I:%M:%S %p", # 2010/6/12 03:01:06 AM
-        "%Y/%m/%d %H:%M",       # 2010/6/12 03:54
-        "%Y/%m/%d %I:%M %p",    # 2010/6/12 03:54 AM
-        "%m/%d/%Y %H:%M:%S",    # 7/7/2017 8:08:46
-        "%m/%d/%Y %I:%M:%S %p", # 7/7/2017 8:08:46 AM
-        "%m/%d/%Y %H:%M",       # 4/7/2017 12:43
-        "%d/%m/%Y %H:%M:%S",    # 14/02/2018 10:00:00
-        "%d/%m/%Y %H:%M",       # 14/02/2018 10:00
-        "%Y-%m-%d %H:%M:%S",    # 2018-02-14 10:00:00
-        "%Y-%m-%d %H:%M",       # 2018-02-14 10:00
+        "%Y/%m/%d %H:%M:%S",  # 2010/6/12 03:01:06
+        "%Y/%m/%d %I:%M:%S %p",  # 2010/6/12 03:01:06 AM
+        "%Y/%m/%d %H:%M",  # 2010/6/12 03:54
+        "%Y/%m/%d %I:%M %p",  # 2010/6/12 03:54 AM
+        "%m/%d/%Y %H:%M:%S",  # 7/7/2017 8:08:46
+        "%m/%d/%Y %I:%M:%S %p",  # 7/7/2017 8:08:46 AM
+        "%m/%d/%Y %H:%M",  # 4/7/2017 12:43
+        "%d/%m/%Y %H:%M:%S",  # 14/02/2018 10:00:00
+        "%d/%m/%Y %H:%M",  # 14/02/2018 10:00
+        "%Y-%m-%d %H:%M:%S",  # 2018-02-14 10:00:00
+        "%Y-%m-%d %H:%M",  # 2018-02-14 10:00
     ]
 
     @staticmethod
@@ -87,11 +92,16 @@ class DataPreprocess:
         def _time_to_ms(val: str) -> int:
             try:
                 parts = str(val).strip().split(":")
-                if len(parts) == 3:      # HH:MM:SS[.f]
-                    return int((float(parts[0]) * 3600
-                                + float(parts[1]) * 60
-                                + float(parts[2])) * 1000)
-                elif len(parts) == 2:    # MM:SS[.f]
+                if len(parts) == 3:  # HH:MM:SS[.f]
+                    return int(
+                        (
+                            float(parts[0]) * 3600
+                            + float(parts[1]) * 60
+                            + float(parts[2])
+                        )
+                        * 1000
+                    )
+                elif len(parts) == 2:  # MM:SS[.f]
                     return int((float(parts[0]) * 60 + float(parts[1])) * 1000)
             except Exception:
                 pass
@@ -301,7 +311,9 @@ class DataPreprocess:
         n_total = self.feature_matrix[UNIFIED_FEATURE_NAMES].size
         n_nan = self.feature_matrix[UNIFIED_FEATURE_NAMES].isna().sum().sum()
         pct_nan = n_nan / n_total * 100 if n_total > 0 else 0
-        meta_present = [c for c in SEQUENCE_META_COLUMNS if c in self.feature_matrix.columns]
+        meta_present = [
+            c for c in SEQUENCE_META_COLUMNS if c in self.feature_matrix.columns
+        ]
         self.log.info(
             f"Feature matrix: {self.feature_matrix.shape} "
             f"({n_feature_cols} flow features + {len(meta_present)} metadata cols), "
