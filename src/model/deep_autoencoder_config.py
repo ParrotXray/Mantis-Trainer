@@ -11,7 +11,7 @@ class DeepAutoencoderConfig:
     fill_value: float = 0.0
 
     # Sequence Parameters
-    window_size: int = 10  # number of consecutive flows per sequence
+    window_size: int = 15  # number of consecutive flows per sequence
     stride: int = 1  # sliding-window step (training)
 
     # LSTM Architecture Parameters
@@ -23,8 +23,8 @@ class DeepAutoencoderConfig:
     # Training Parameters
     learning_rate: float = 0.001
     clipnorm: float = 1.0
-    batch_size: int = 512
-    epochs: int = 100
+    batch_size: int = 4096
+    epochs: int = 400
     validation_split: float = 0.15
     early_stopping_patience: int = 15
     reduce_lr_patience: int = 5
