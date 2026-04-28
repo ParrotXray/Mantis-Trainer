@@ -6,7 +6,7 @@ import sys
 import time
 from datetime import timedelta
 
-from components import Classifier, DataPreprocess, DeepAutoencoder, Exporter
+from components import DataPreprocess, DeepAutoencoder, Exporter
 from model import download_dataset, get_dataset_config, list_available_datasets
 from utils import Logger, pipeline_stage
 
@@ -38,8 +38,7 @@ Examples:
 
   # Run individual stages
   python main.py -s cic2018 -dp    # Preprocess only
-  python main.py -da                # Train autoencoder
-  python main.py -cl                # Train classifier
+  python main.py -da                # Train LSTM Autoencoder
   python main.py -ep                # Export to ONNX
 
 Available datasets: {', '.join(available)}
@@ -64,10 +63,10 @@ Available datasets: {', '.join(available)}
         "-dp", "--datapreprocess", action="store_true", help="Data preprocessing"
     )
     parser.add_argument(
-        "-da", "--deepautoencoder", action="store_true", help="Train Deep Autoencoder"
-    )
-    parser.add_argument(
-        "-cl", "--classifier", action="store_true", help="Train ResNet MLP Classifier"
+        "-da",
+        "--deepautoencoder",
+        action="store_true",
+        help="Train LSTM Deep Autoencoder",
     )
     parser.add_argument(
         "-ep", "--export", action="store_true", help="Export models to ONNX"
@@ -80,7 +79,6 @@ Available datasets: {', '.join(available)}
             args.all,
             args.datapreprocess,
             args.deepautoencoder,
-            args.classifier,
             args.export,
         ]
     ):
@@ -124,12 +122,13 @@ Available datasets: {', '.join(available)}
     if args.all or args.deepautoencoder:
         deep_autoencoder_start = time.perf_counter()
 
-        with pipeline_stage("Deep Autoencoder"):
+        with pipeline_stage("LSTM Deep Autoencoder"):
             with DeepAutoencoder() as da:
                 da.check_environment()
                 da.load_data()
                 da.prepare_data()
                 da.preprocess_data()
+                da.build_sequences()
                 da.build_autoencoder()
                 da.train_autoencoder()
                 da.predict_autoencoder()
@@ -138,28 +137,7 @@ Available datasets: {', '.join(available)}
 
         deep_autoencoder_end = time.perf_counter()
         log.info(
-            f"Deep Autoencoder execution time: {timedelta(seconds=(deep_autoencoder_end - deep_autoencoder_start))}"
-        )
-
-    if args.all or args.classifier:
-        classifier_start = time.perf_counter()
-
-        with pipeline_stage("ResNet MLP Classifier"):
-            with Classifier() as cl:
-                cl.load_data()
-                cl.prepare_features()
-                cl.split_data()
-                cl.tune_hyperparameters()
-                cl.apply_smote()
-                cl.build_model()
-                cl.train_model()
-                cl.evaluate_model()
-                cl.save_results()
-                cl.generate_visualizations()
-
-        classifier_end = time.perf_counter()
-        log.info(
-            f"ResNet MLP Classifier execution time: {timedelta(seconds=(classifier_end - classifier_start))}"
+            f"LSTM Deep Autoencoder execution time: {timedelta(seconds=(deep_autoencoder_end - deep_autoencoder_start))}"
         )
 
     if args.all or args.export:
@@ -169,7 +147,6 @@ Available datasets: {', '.join(available)}
             with Exporter() as ep:
                 ep.load_models()
                 ep.export_deep_ae_onnx()
-                ep.export_classifier_onnx()
                 ep.build_config_json()
                 ep.save_config_json()
                 ep.verify_onnx_models()

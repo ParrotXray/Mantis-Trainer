@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import joblib
 import lightning as L
@@ -21,69 +21,106 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 
-from model import UNIFIED_FEATURE_NAMES, DeepAutoencoderConfig
+from model import SEQUENCE_META_COLUMNS, UNIFIED_FEATURE_NAMES, DeepAutoencoderConfig
 from utils import Logger
 
 
-class AutoencoderModel(nn.Module):
+# ---------------------------------------------------------------------------
+# LSTM Autoencoder model
+# ---------------------------------------------------------------------------
+
+
+class LSTMAutoencoderModel(nn.Module):
+    """
+    Sequence-to-sequence LSTM autoencoder for temporal flow anomaly detection.
+
+    Encoder:  LSTM  →  linear bottleneck (encoding_dim)
+    Decoder:  repeat bottleneck × seq_len  →  LSTM  →  linear output
+    """
+
     def __init__(
         self,
         input_dim: int,
-        layer_sizes: List[int],
+        hidden_size: int,
+        num_layers: int,
         encoding_dim: int,
-        dropout_rates: List[float],
-        l2_reg: float = 0.0001,
+        dropout: float = 0.2,
     ):
         super().__init__()
         self.input_dim = input_dim
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
         self.encoding_dim = encoding_dim
 
-        encoder_layers = []
-        prev_size = input_dim
-        for size, dropout in zip(layer_sizes, dropout_rates):
-            encoder_layers.append(nn.Linear(prev_size, size))
-            encoder_layers.append(nn.BatchNorm1d(size))
-            encoder_layers.append(nn.ReLU())
-            if dropout > 0:
-                encoder_layers.append(nn.Dropout(dropout))
-            prev_size = size
+        lstm_dropout = dropout if num_layers > 1 else 0.0
 
-        encoder_layers.append(nn.Linear(prev_size, encoding_dim))
-        encoder_layers.append(nn.ReLU())
-        self.encoder = nn.Sequential(*encoder_layers)
+        # Encoder
+        self.encoder_lstm = nn.LSTM(
+            input_size=input_dim,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=lstm_dropout,
+        )
+        self.encoder_fc = nn.Linear(hidden_size, encoding_dim)
 
-        decoder_layers = []
-        prev_size = encoding_dim
-        for size, dropout in zip(reversed(layer_sizes), reversed(dropout_rates)):
-            decoder_layers.append(nn.Linear(prev_size, size))
-            decoder_layers.append(nn.BatchNorm1d(size))
-            decoder_layers.append(nn.ReLU())
-            if dropout > 0:
-                decoder_layers.append(nn.Dropout(dropout))
-            prev_size = size
-
-        decoder_layers.append(nn.Linear(prev_size, input_dim))
-        self.decoder = nn.Sequential(*decoder_layers)
-
-        self.l2_reg = l2_reg
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        encoded = self.encoder(x)
-        decoded = self.decoder(encoded)
-        return decoded
+        # Decoder
+        self.decoder_fc = nn.Linear(encoding_dim, hidden_size)
+        self.decoder_lstm = nn.LSTM(
+            input_size=encoding_dim,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=lstm_dropout,
+        )
+        self.output_fc = nn.Linear(hidden_size, input_dim)
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
-        return self.encoder(x)
+        """x: (batch, seq_len, input_dim) → (batch, encoding_dim)"""
+        _, (h_n, _) = self.encoder_lstm(x)
+        return self.encoder_fc(h_n[-1])
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: (batch, seq_len, input_dim) → reconstruction (same shape)"""
+        batch_size, seq_len, _ = x.shape
+
+        # Encode to bottleneck
+        _, (h_n, _) = self.encoder_lstm(x)
+        encoded = self.encoder_fc(h_n[-1])  # (batch, encoding_dim)
+
+        # Repeat bottleneck as decoder input for every timestep
+        decoder_input = encoded.unsqueeze(1).expand(
+            batch_size, seq_len, self.encoding_dim
+        )  # (batch, seq_len, encoding_dim)
+
+        # Initialise decoder hidden state from bottleneck
+        h_0 = (
+            self.decoder_fc(encoded)
+            .unsqueeze(0)
+            .expand(self.num_layers, batch_size, self.hidden_size)
+            .contiguous()
+        )
+        c_0 = torch.zeros_like(h_0)
+
+        decoder_out, _ = self.decoder_lstm(
+            decoder_input, (h_0, c_0)
+        )  # (batch, seq_len, hidden_size)
+        return self.output_fc(decoder_out)  # (batch, seq_len, input_dim)
 
 
-class AutoencoderLightningModule(L.LightningModule):
+# ---------------------------------------------------------------------------
+# PyTorch Lightning wrapper
+# ---------------------------------------------------------------------------
+
+
+class LSTMAutoencoderLightningModule(L.LightningModule):
     def __init__(
         self,
-        model: AutoencoderModel,
+        model: LSTMAutoencoderModel,
         learning_rate: float = 0.001,
         clipnorm: float = 1.0,
         reduce_lr_factor: float = 0.5,
-        reduce_lr_patience: int = 8,
+        reduce_lr_patience: int = 5,
         min_lr: float = 1e-7,
     ):
         super().__init__()
@@ -94,28 +131,27 @@ class AutoencoderLightningModule(L.LightningModule):
         self.reduce_lr_patience = reduce_lr_patience
         self.min_lr = min_lr
         self.loss_fn = nn.MSELoss()
-
         self.save_hyperparameters(ignore=["model"])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.model(x)
 
-    def training_step(self, batch: torch.Tensor) -> torch.Tensor:
+    def training_step(self, batch: Tuple[torch.Tensor], batch_idx: int) -> torch.Tensor:
         x = batch[0]
         x_hat = self(x)
         loss = self.loss_fn(x_hat, x)
         mae = torch.mean(torch.abs(x_hat - x))
-
         self.log("train_loss", loss, prog_bar=True, on_step=False, on_epoch=True)
         self.log("train_mae", mae, prog_bar=False, on_step=False, on_epoch=True)
         return loss
 
-    def validation_step(self, batch: torch.Tensor) -> torch.Tensor:
+    def validation_step(
+        self, batch: Tuple[torch.Tensor], batch_idx: int
+    ) -> torch.Tensor:
         x = batch[0]
         x_hat = self(x)
         loss = self.loss_fn(x_hat, x)
         mae = torch.mean(torch.abs(x_hat - x))
-
         self.log("val_loss", loss, prog_bar=True, on_step=False, on_epoch=True)
         self.log("val_mae", mae, prog_bar=False, on_step=False, on_epoch=True)
         return loss
@@ -124,7 +160,6 @@ class AutoencoderLightningModule(L.LightningModule):
         optimizer = torch.optim.Adam(
             self.parameters(),
             lr=self.learning_rate,
-            weight_decay=self.model.l2_reg,
         )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
@@ -144,39 +179,145 @@ class AutoencoderLightningModule(L.LightningModule):
         }
 
 
+# ---------------------------------------------------------------------------
+# Sequence helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_train_sequences(
+    df: pd.DataFrame,
+    scaled: np.ndarray,
+    window_size: int,
+    stride: int,
+) -> np.ndarray:
+    """
+    Build sliding-window sequences for training.
+
+    Groups benign flows by src_ip (if available) and sorts each group by
+    timestamp (if available) before cutting windows. Groups that are shorter
+    than window_size are silently skipped.
+
+    Returns
+    -------
+    np.ndarray of shape (N_sequences, window_size, n_features)
+    """
+    n_features = scaled.shape[1]
+    has_meta = all(c in df.columns for c in SEQUENCE_META_COLUMNS)
+
+    sequences: List[np.ndarray] = []
+
+    if has_meta:
+        tmp = df[["src_ip", "timestamp"]].copy()
+        tmp["_pos"] = range(len(df))
+        for _, group in tmp.groupby("src_ip", sort=False):
+            group_sorted = group.sort_values("timestamp")
+            positions = group_sorted["_pos"].values
+            n = len(positions)
+            for start in range(0, n - window_size + 1, stride):
+                sequences.append(scaled[positions[start : start + window_size]])
+    else:
+        n = len(scaled)
+        for start in range(0, n - window_size + 1, stride):
+            sequences.append(scaled[start : start + window_size])
+
+    if not sequences:
+        return np.empty((0, window_size, n_features), dtype=np.float32)
+    return np.stack(sequences).astype(np.float32)
+
+
+def _make_per_flow_sequences(
+    df: pd.DataFrame,
+    scaled: np.ndarray,
+    window_size: int,
+) -> np.ndarray:
+    """
+    Build one padded sequence per flow (sequence ends at that flow).
+
+    Flows are grouped by src_ip and ordered by timestamp so that each
+    sequence captures the recent temporal context of that specific source.
+    Sequences shorter than window_size are zero-padded on the left.
+
+    Returns
+    -------
+    np.ndarray of shape (N_flows, window_size, n_features), one row per flow
+    in the *original* order of `df` (row i → sequences[i]).
+    """
+    n_flows = len(scaled)
+    n_features = scaled.shape[1]
+    sequences = np.zeros((n_flows, window_size, n_features), dtype=np.float32)
+
+    has_meta = all(c in df.columns for c in SEQUENCE_META_COLUMNS)
+
+    if has_meta:
+        tmp = df[["src_ip", "timestamp"]].copy()
+        tmp["_pos"] = range(n_flows)
+        for _, group in tmp.groupby("src_ip", sort=False):
+            group_sorted = group.sort_values("timestamp")
+            positions = group_sorted["_pos"].values
+            for k, pos in enumerate(positions):
+                start_in_group = max(0, k + 1 - window_size)
+                window_pos = positions[start_in_group : k + 1]
+                pad_len = window_size - len(window_pos)
+                sequences[pos, pad_len:] = scaled[window_pos]
+    else:
+        for i in range(n_flows):
+            start = max(0, i + 1 - window_size)
+            pad_len = window_size - (i + 1 - start)
+            sequences[i, pad_len:] = scaled[start : i + 1]
+
+    return sequences
+
+
+# ---------------------------------------------------------------------------
+# Main DeepAutoencoder orchestrator
+# ---------------------------------------------------------------------------
+
+
 class DeepAutoencoder:
     def __init__(self, config: Optional[DeepAutoencoderConfig] = None) -> None:
         self.benign_data: Optional[pd.DataFrame] = None
         self.attack_data: Optional[pd.DataFrame] = None
-        self.labels: Optional[pd.Series] = None
 
-        self.features: Optional[pd.DataFrame] = None
-        self.binary_labels: Optional[pd.Series] = None
+        # Feature columns (no metadata)
+        self._feature_cols: Optional[List[str]] = None
 
-        self.benign_features: Optional[pd.DataFrame] = None
+        # DataFrames carrying both features + metadata (src_ip, timestamp)
         self.benign_train: Optional[pd.DataFrame] = None
         self.benign_val: Optional[pd.DataFrame] = None
+        self.test_df: Optional[pd.DataFrame] = None  # features + meta
 
-        self.test_features: Optional[pd.DataFrame] = None
-        self.test_labels: Optional[pd.Series] = None  # binary
+        # Binary / original labels for the test set
+        self.test_labels: Optional[pd.Series] = None
         self.test_labels_orig: Optional[pd.Series] = None
 
-        self.scaler: Optional[StandardScaler] = None
-        self.clip_params: Optional[Dict[str, Dict[str, float]]] = None
+        # Scaled feature arrays (2-D, rows aligned with the DataFrames above)
         self.benign_train_scaled: Optional[np.ndarray] = None
         self.benign_val_scaled: Optional[np.ndarray] = None
         self.test_features_scaled: Optional[np.ndarray] = None
 
-        self.autoencoder_model: Optional[AutoencoderModel] = None
-        self.lightning_module: Optional[AutoencoderLightningModule] = None
+        # Sliding-window 3-D sequence tensors for training/validation
+        self.train_sequences: Optional[np.ndarray] = None
+        self.val_sequences: Optional[np.ndarray] = None
 
-        self.ae_mse_scores: Optional[np.ndarray] = None  # test set (benign + attack)
+        # Per-flow anomaly scores on the test set
+        self.ae_mse_scores: Optional[np.ndarray] = None
+        self.ae_threshold: Optional[float] = None
+
+        self.scaler: Optional[StandardScaler] = None
+        self.clip_params: Optional[Dict[str, Dict[str, float]]] = None
+
+        self.autoencoder_model: Optional[LSTMAutoencoderModel] = None
+        self.lightning_module: Optional[LSTMAutoencoderLightningModule] = None
 
         self.config: DeepAutoencoderConfig = config or DeepAutoencoderConfig()
         self.log: Logger = Logger(__name__)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.feature_names: List[str] = UNIFIED_FEATURE_NAMES
+
+    # ------------------------------------------------------------------
+    # Context manager
+    # ------------------------------------------------------------------
 
     def __enter__(self):
         return self
@@ -188,12 +329,14 @@ class DeepAutoencoder:
         if self.autoencoder_model is not None:
             self.autoencoder_model.cpu()
             self.autoencoder_model = None
-
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-
         plt.close("all")
         return False
+
+    # ------------------------------------------------------------------
+    # Pipeline stages
+    # ------------------------------------------------------------------
 
     def check_environment(self) -> None:
         self.log.info(f"PyTorch: {torch.__version__}")
@@ -213,22 +356,46 @@ class DeepAutoencoder:
         self.attack_data = pd.read_csv("./outputs/preprocessing_attack.csv")
         self.attack_data.columns = self.attack_data.columns.str.strip()
 
-        self.log.info(f"Normal samples: {len(self.benign_data):,}")
-        self.log.info(f"Attack samples: {len(self.attack_data):,}")
+        self.log.info(f"Benign samples : {len(self.benign_data):,}")
+        self.log.info(f"Attack samples : {len(self.attack_data):,}")
+
+        # Report metadata availability
+        has_ts = "timestamp" in self.benign_data.columns
+        has_ip = "src_ip" in self.benign_data.columns
+        self.log.info(f"Sequence metadata — timestamp: {has_ts}, src_ip: {has_ip}")
 
     def prepare_data(self) -> None:
         self.log.info("Preparing data...")
 
-        available = [f for f in self.feature_names if f in self.benign_data.columns]
+        # ---- determine available feature columns ----
+        available_features = [
+            f for f in self.feature_names if f in self.benign_data.columns
+        ]
         self.log.info(
-            f"Using {len(available)}/{len(self.feature_names)} features for AE"
+            f"Using {len(available_features)}/{len(self.feature_names)} "
+            f"flow features for LSTM AE"
         )
 
-        self.benign_features = self.benign_data[available].copy()
-        attack_features = self.attack_data[available].copy()
+        # ---- collect metadata columns present in the data ----
+        meta_cols = [c for c in SEQUENCE_META_COLUMNS if c in self.benign_data.columns]
 
+        all_cols = available_features + meta_cols
+
+        # ---- benign: keep features + metadata for sequencing ----
+        benign_all = self.benign_data[all_cols].copy()
+
+        # ---- test-set attack features (+ metadata if available) ----
+        atk_meta_cols = [
+            c for c in SEQUENCE_META_COLUMNS if c in self.attack_data.columns
+        ]
+        atk_cols = available_features + atk_meta_cols
+        attack_all = self.attack_data[
+            [c for c in atk_cols if c in self.attack_data.columns]
+        ].copy()
+
+        # ---- train / val / test split on benign rows ----
         benign_trainval, benign_test = train_test_split(
-            self.benign_features,
+            benign_all,
             test_size=self.config.test_split,
             random_state=self.config.split_random_state,
         )
@@ -239,7 +406,7 @@ class DeepAutoencoder:
             random_state=self.config.split_random_state,
         )
 
-        test_features = pd.concat([benign_test, attack_features], ignore_index=True)
+        # ---- test set: benign held-out + all attacks ----
         test_labels_orig = pd.concat(
             [
                 self.benign_data.loc[benign_test.index, "Label"],
@@ -247,56 +414,58 @@ class DeepAutoencoder:
             ],
             ignore_index=True,
         )
-        test_binary = (~test_labels_orig.isin(["Normal"])).astype(int)
-
-        self.test_features = test_features
-        self.test_labels = test_binary
+        self.test_labels = (~test_labels_orig.isin(["Normal"])).astype(int)
         self.test_labels_orig = test_labels_orig
 
-        self.labels = pd.concat(
-            [self.benign_data["Label"], self.attack_data["Label"]], ignore_index=True
+        # Combine with metadata for per-flow sequence scoring
+        self.test_df = pd.concat(
+            [benign_test.reset_index(drop=True), attack_all.reset_index(drop=True)],
+            ignore_index=True,
         )
-        self.features = pd.concat(
-            [self.benign_features, attack_features], ignore_index=True
-        )
-        self.binary_labels = (~self.labels.isin(["Normal"])).astype(int)
+
+        # Store feature column list (no metadata)
+        self._feature_cols = available_features
 
         self.log.info(
-            f"Benign split:  train={len(self.benign_train):,} "
+            f"Benign split: train={len(self.benign_train):,} "
             f"/ val={len(self.benign_val):,} "
             f"/ test={len(benign_test):,}"
         )
-        self.log.info(f"Attack samples (test only): {len(attack_features):,}")
+        self.log.info(f"Attack samples (test only): {len(attack_all):,}")
         self.log.info(
-            f"Test set total: {len(self.test_features):,} "
+            f"Test set total : {len(self.test_df):,} "
             f"(benign={int((self.test_labels == 0).sum()):,}, "
             f"attack={int((self.test_labels == 1).sum()):,})"
         )
-        self.log.info(f"Number of features: {self.features.shape[1]}")
+        self.log.info(f"Flow features  : {len(self._feature_cols)}")
 
     def preprocess_data(self) -> None:
-        self.log.info("Preprocessing data...")
+        self.log.info("Preprocessing data (scale flow features only)...")
+
+        def _feat(df: pd.DataFrame) -> pd.DataFrame:
+            return df[self._feature_cols].copy()
 
         def _clean(df: pd.DataFrame) -> pd.DataFrame:
             return df.replace([np.inf, -np.inf], np.nan).fillna(self.config.fill_value)
 
-        self.benign_train = _clean(self.benign_train)
-        self.benign_val = _clean(self.benign_val)
-        self.test_features = _clean(self.test_features)
+        train_feat = _clean(_feat(self.benign_train))
+        val_feat = _clean(_feat(self.benign_val))
+        test_feat = _clean(_feat(self.test_df))
 
+        # Winsorize using training-set quantiles
         self.clip_params = {}
-        for col in self.benign_train.columns:
-            lower = self.benign_train[col].quantile(self.config.winsorize_lower)
-            upper = self.benign_train[col].quantile(self.config.winsorize_upper)
-            self.benign_train[col] = np.clip(self.benign_train[col], lower, upper)
-            self.benign_val[col] = np.clip(self.benign_val[col], lower, upper)
-            self.test_features[col] = np.clip(self.test_features[col], lower, upper)
+        for col in train_feat.columns:
+            lower = train_feat[col].quantile(self.config.winsorize_lower)
+            upper = train_feat[col].quantile(self.config.winsorize_upper)
+            train_feat[col] = np.clip(train_feat[col], lower, upper)
+            val_feat[col] = np.clip(val_feat[col], lower, upper)
+            test_feat[col] = np.clip(test_feat[col], lower, upper)
             self.clip_params[col] = {"lower": float(lower), "upper": float(upper)}
 
         self.scaler = StandardScaler()
-        self.benign_train_scaled = self.scaler.fit_transform(self.benign_train)
-        self.benign_val_scaled = self.scaler.transform(self.benign_val)
-        self.test_features_scaled = self.scaler.transform(self.test_features)
+        self.benign_train_scaled = self.scaler.fit_transform(train_feat)
+        self.benign_val_scaled = self.scaler.transform(val_feat)
+        self.test_features_scaled = self.scaler.transform(test_feat)
 
         def _clip_scaled(arr: np.ndarray) -> np.ndarray:
             return np.clip(arr, self.config.clip_min, self.config.clip_max)
@@ -307,27 +476,62 @@ class DeepAutoencoder:
 
         self.log.info("Preprocessing completed")
 
+    def build_sequences(self) -> None:
+        """
+        Convert scaled flows into sliding-window sequences (for training) and
+        per-flow padded sequences (for inference scoring).
+
+        Training/validation sequences are grouped by src_ip and sorted by
+        timestamp so the LSTM learns genuine temporal patterns per host.
+        """
+        W = self.config.window_size
+        S = self.config.stride
+        self.log.info(f"Building sequences — window_size={W}, stride={S} (training)")
+
+        self.train_sequences = _make_train_sequences(
+            self.benign_train, self.benign_train_scaled, W, S
+        )
+        self.val_sequences = _make_train_sequences(
+            self.benign_val, self.benign_val_scaled, W, S
+        )
+
+        self.log.info(
+            f"Training sequences : {len(self.train_sequences):,} "
+            f"shape={self.train_sequences.shape}"
+        )
+        self.log.info(
+            f"Validation sequences: {len(self.val_sequences):,} "
+            f"shape={self.val_sequences.shape}"
+        )
+
+        if len(self.train_sequences) == 0:
+            raise RuntimeError(
+                "No training sequences were generated. "
+                "Increase data size or decrease window_size."
+            )
+
     def build_autoencoder(self) -> None:
-        self.log.info("Building Deep Autoencoder...")
+        self.log.info("Building LSTM Deep Autoencoder...")
 
-        input_dim = self.benign_train_scaled.shape[1]
+        input_dim = len(self._feature_cols)
 
-        layer_info = " -> ".join(
-            [str(input_dim)]
-            + [str(s) for s in self.config.layer_sizes]
-            + [str(self.config.encoding_dim)]
+        self.log.info(
+            f"Architecture: input_dim={input_dim} "
+            f"→ LSTM(hidden={self.config.hidden_size}, "
+            f"layers={self.config.num_layers}) "
+            f"→ bottleneck={self.config.encoding_dim} "
+            f"→ LSTM decoder → {input_dim}"
         )
-        self.log.info(f"Architecture: {layer_info}")
 
-        self.autoencoder_model = AutoencoderModel(
+        self.autoencoder_model = LSTMAutoencoderModel(
             input_dim=input_dim,
-            layer_sizes=self.config.layer_sizes,
+            hidden_size=self.config.hidden_size,
+            num_layers=self.config.num_layers,
             encoding_dim=self.config.encoding_dim,
-            dropout_rates=self.config.dropout_rates,
-            l2_reg=self.config.l2_reg,
+            dropout=self.config.dropout,
         )
 
-        self.lightning_module = AutoencoderLightningModule(
+        self.lightning_module = LSTMAutoencoderLightningModule(
             model=self.autoencoder_model,
             learning_rate=self.config.learning_rate,
             clipnorm=self.config.clipnorm,
@@ -340,15 +544,10 @@ class DeepAutoencoder:
         self.log.info(f"Total parameters: {total_params:,}")
 
     def train_autoencoder(self) -> None:
-        """
-        AE is trained on benign_train; benign_val is used as the Lightning
-        validation set for early-stopping / LR scheduling.
-        Neither set contains attack samples → no leakage.
-        """
-        self.log.info("Training Deep Autoencoder with PyTorch Lightning...")
+        self.log.info("Training LSTM Deep Autoencoder with PyTorch Lightning...")
 
-        train_dataset = TensorDataset(torch.FloatTensor(self.benign_train_scaled))
-        val_dataset = TensorDataset(torch.FloatTensor(self.benign_val_scaled))
+        train_dataset = TensorDataset(torch.FloatTensor(self.train_sequences))
+        val_dataset = TensorDataset(torch.FloatTensor(self.val_sequences))
 
         num_workers = 4 if os.name != "nt" else 0
 
@@ -405,44 +604,46 @@ class DeepAutoencoder:
 
         best_model_path = callbacks[1].best_model_path
         if best_model_path:
-            self.lightning_module = AutoencoderLightningModule.load_from_checkpoint(
+            self.lightning_module = LSTMAutoencoderLightningModule.load_from_checkpoint(
                 best_model_path,
                 model=self.autoencoder_model,
             )
             self.log.info(f"Loaded best model from {best_model_path}")
 
-        epochs_trained = (
-            trainer.current_epoch + 1
-            if trainer.current_epoch is not None
-            else self.config.epochs
-        )
-
-        self.log.info(f"Training completed: {epochs_trained} epochs")
+        self.log.info(f"Training completed: {trainer.current_epoch + 1} epochs")
         self.log.info(f"Best validation loss: {callbacks[1].best_model_score:.6f}")
 
-    def _ae_predict_mse(self, features_scaled: np.ndarray) -> np.ndarray:
-        self.lightning_module.eval()
-        self.lightning_module.to(self.device)
-
-        batch_size = 2048
-        n_samples = len(features_scaled)
-        mse_scores = np.zeros(n_samples, dtype=np.float32)
-
-        with torch.no_grad():
-            for start in range(0, n_samples, batch_size):
-                end = min(start + batch_size, n_samples)
-                batch = torch.FloatTensor(features_scaled[start:end]).to(self.device)
-                recon = self.lightning_module(batch).cpu().numpy()
-                mse_scores[start:end] = np.mean(
-                    np.square(features_scaled[start:end] - recon), axis=1
-                )
-
-        return mse_scores
-
     def predict_autoencoder(self) -> None:
-        self.log.info("Calculating Deep AE anomaly scores on test set...")
+        """
+        Compute per-flow anomaly scores on the test set.
 
-        self.ae_mse_scores = self._ae_predict_mse(self.test_features_scaled)
+        For each flow a padded sequence of length window_size is built
+        (src_ip-grouped, timestamp-sorted, zero-padded at the start for
+        flows with insufficient context). The reconstruction MSE is averaged
+        over all timesteps and all features.
+        """
+        self.log.info(
+            "Calculating LSTM AE anomaly scores on test set "
+            f"({len(self.test_df):,} flows)..."
+        )
+
+        val_seqs = _make_per_flow_sequences(
+            self.benign_val,
+            self.benign_val_scaled,
+            self.config.window_size,
+        )
+        val_scores = self._ae_predict_mse(val_seqs)
+        self.log.info(
+            f"Validation scores — mean={val_scores.mean():.6f}, std={val_scores.std():.6f}"
+        )
+
+        per_flow_seqs = _make_per_flow_sequences(
+            self.test_df,
+            self.test_features_scaled,
+            self.config.window_size,
+        )  # (N_flows, W, F)
+
+        self.ae_mse_scores = self._ae_predict_mse(per_flow_seqs)
 
         ae_mse_benign = self.ae_mse_scores[self.test_labels == 0]
         ae_mse_attack = self.ae_mse_scores[self.test_labels == 1]
@@ -452,6 +653,90 @@ class DeepAutoencoder:
             if ae_mse_benign.mean() > 0
             else 0
         )
+
+        attack_mask = self.test_labels == 1
+        attack_scores = self.ae_mse_scores[attack_mask]
+        attack_labels = self.test_labels_orig[attack_mask]
+
+        candidate_names = [str(p) for p in range(90, 100)] + ["mean+2std", "mean+1std"]
+
+        # Val set candidates → used for threshold selection and export
+        val_candidate_values = np.array(
+            [float(np.percentile(val_scores, p)) for p in range(90, 100)]
+            + [
+                float(val_scores.mean() + 2 * val_scores.std()),
+                float(val_scores.mean() + 1 * val_scores.std()),
+            ]
+        )
+
+        # Test set candidates → for evaluation/comparison only
+        test_candidate_values = np.array(
+            [float(np.percentile(ae_mse_benign, p)) for p in range(90, 100)]
+            + [
+                float(ae_mse_benign.mean() + 2 * ae_mse_benign.std()),
+                float(ae_mse_benign.mean() + 1 * ae_mse_benign.std()),
+            ]
+        )
+
+        val_fpr = np.array([(ae_mse_benign > t).mean() for t in val_candidate_values])
+        val_tpr = np.array([(ae_mse_attack > t).mean() for t in val_candidate_values])
+        val_youden = val_tpr - val_fpr
+
+        test_fpr = np.array([(ae_mse_benign > t).mean() for t in test_candidate_values])
+        test_tpr = np.array([(ae_mse_attack > t).mean() for t in test_candidate_values])
+        test_youden = test_tpr - test_fpr
+
+        best_idx = int(np.argmax(val_youden))
+        self.ae_threshold = float(val_candidate_values[best_idx])
+        self.ae_threshold_method = candidate_names[best_idx]
+
+        # Threshold analysis table (val set candidates)
+        lines = [
+            "\nThreshold Analysis [Val Set Candidates] (exported threshold from this section):"
+        ]
+        lines.append(
+            f"{'Name':<12} {'Threshold':<12} {'FPR':<10} {'TPR':<10} {'Youden':<10}"
+        )
+        lines.append("-" * 54)
+        for name, thresh, fpr_p, tpr_p, youden in zip(
+            candidate_names, val_candidate_values, val_fpr, val_tpr, val_youden
+        ):
+            marker = " <-- best" if name == candidate_names[best_idx] else ""
+            lines.append(
+                f"{name:<12} {thresh:<12.4f} {fpr_p*100:<10.2f}% {tpr_p*100:<10.2f}% {youden:<10.4f}{marker}"
+            )
+        lines.append(
+            f"\nBest: {candidate_names[best_idx]} = {self.ae_threshold:.6f} (Youden={val_youden[best_idx]:.4f})"
+        )
+        self.log.info("\n".join(lines))
+
+        # Threshold analysis table (test set candidates, evaluation only)
+        lines = [
+            "\nThreshold Analysis [Test Set Candidates] (evaluation reference only):"
+        ]
+        lines.append(
+            f"{'Name':<12} {'Threshold':<12} {'FPR':<10} {'TPR':<10} {'Youden':<10}"
+        )
+        lines.append("-" * 54)
+        for name, thresh, fpr_p, tpr_p, youden in zip(
+            candidate_names, test_candidate_values, test_fpr, test_tpr, test_youden
+        ):
+            lines.append(
+                f"{name:<12} {thresh:<12.4f} {fpr_p*100:<10.2f}% {tpr_p*100:<10.2f}% {youden:<10.4f}"
+            )
+        self.log.info("\n".join(lines))
+
+        thresholds = dict(zip(candidate_names, test_candidate_values.tolist()))
+
+        # Per-class TPR for each threshold
+        for name, threshold in thresholds.items():
+            lines = [f"\nPer-class TPR @ threshold={threshold:.4f} ({name}):", "=" * 55]
+            for label in sorted(attack_labels.unique()):
+                mask = attack_labels.values == label
+                tpr = (attack_scores[mask] > threshold).mean()
+                lines.append(f"  {label:<35} TPR={tpr:.4f} ({mask.sum():>6,} samples)")
+            lines.append("=" * 55)
+            self.log.info("\n".join(lines))
 
         self.log.info(
             "\n".join(
@@ -464,6 +749,30 @@ class DeepAutoencoder:
             )
         )
 
+    def _ae_predict_mse(self, sequences: np.ndarray) -> np.ndarray:
+        """
+        sequences: (N, W, F)  →  per-flow MSE scores  (N,)
+        MSE is averaged over all W timesteps and all F features.
+        """
+        self.lightning_module.eval()
+        self.lightning_module.to(self.device)
+
+        n = len(sequences)
+        mse_scores = np.zeros(n, dtype=np.float32)
+        batch_size = 512
+
+        with torch.no_grad():
+            for start in range(0, n, batch_size):
+                end = min(start + batch_size, n)
+                batch = torch.FloatTensor(sequences[start:end]).to(self.device)
+                recon = self.lightning_module(batch).cpu().numpy()
+                # Mean over (W, F) → scalar per sample
+                mse_scores[start:end] = np.mean(
+                    np.square(sequences[start:end] - recon), axis=(1, 2)
+                )
+
+        return mse_scores
+
     def save_results(self) -> None:
         self.log.info("Saving results...")
 
@@ -471,11 +780,12 @@ class DeepAutoencoder:
         os.makedirs("./artifacts", exist_ok=True)
         os.makedirs("./outputs", exist_ok=True)
 
-        attack_mask = (self.test_labels == 1).values
+        attack_mask = self.test_labels.values == 1
 
         output = pd.DataFrame(
-            self.test_features_scaled[attack_mask],
-            columns=list(self.benign_train.columns),
+            # self.test_features_scaled[attack_mask],
+            self.test_df[self._feature_cols].values[attack_mask],
+            columns=self._feature_cols,
         )
         output["ae_anomaly_score"] = self.ae_mse_scores[attack_mask]
         output["Label"] = self.test_labels_orig[attack_mask].values
@@ -486,33 +796,35 @@ class DeepAutoencoder:
             f"Saved: {output_path} ({len(output):,} rows, {output.shape[1]} columns)"
         )
 
-        normal_scores = self.ae_mse_scores[self.test_labels == 0]
-        ae_threshold = float(normal_scores.mean() + 2 * normal_scores.std())
         self.log.info(
-            f"\nAE threshold (mean+2std): {ae_threshold:.6f}"
-            f"\n  benign test mean={normal_scores.mean():.6f}, std={normal_scores.std():.6f}"
+            f"\nAE threshold (val set, {self.ae_threshold_method}): {self.ae_threshold:.6f}"
         )
 
+        # ---- save PyTorch checkpoint ----
         model_ae_path = Path("artifacts") / "deep_autoencoder.pt"
         torch.save(
             {
                 "model_state_dict": self.autoencoder_model.state_dict(),
                 "input_dim": self.autoencoder_model.input_dim,
+                "hidden_size": self.autoencoder_model.hidden_size,
+                "num_layers": self.autoencoder_model.num_layers,
                 "encoding_dim": self.autoencoder_model.encoding_dim,
-                "layer_sizes": self.config.layer_sizes,
-                "dropout_rates": self.config.dropout_rates,
-                "l2_reg": self.config.l2_reg,
+                "dropout": self.config.dropout,
+                "window_size": self.config.window_size,
             },
             model_ae_path,
         )
         self.log.info(f"Saved: {model_ae_path}")
 
+        # ---- save config / scaler ----
         config_data = {
             "scaler": self.scaler,
             "clip_params": self.clip_params,
             "encoding_dim": self.config.encoding_dim,
-            "feature_names": list(self.benign_train.columns),
-            "ae_threshold": ae_threshold,
+            "window_size": self.config.window_size,
+            "feature_names": self._feature_cols,
+            "ae_threshold": self.ae_threshold,
+            "ae_threshold_method": self.ae_threshold_method,
         }
         config_path = Path("artifacts") / "deep_ae_config.pkl"
         joblib.dump(config_data, config_path)
@@ -543,7 +855,7 @@ class DeepAutoencoder:
             color="red",
             density=True,
         )
-        ax.set_xlabel("AE MSE Score")
+        ax.set_xlabel("LSTM AE MSE Score")
         ax.set_title("Anomaly Score Distribution (Test Set)")
         ax.legend()
         ax.grid(alpha=0.3)
@@ -557,25 +869,25 @@ class DeepAutoencoder:
             labels=["Normal", "Attack"],
             showfliers=False,
         )
-        ax.set_ylabel("AE MSE Score")
+        ax.set_ylabel("LSTM AE MSE Score")
         ax.set_title("Score Distribution by Class (Test Set)")
         ax.grid(alpha=0.3)
 
         ax = axes[2]
         attack_labels = self.test_labels_orig[self.test_labels == 1]
-        attack_scores_all = self.ae_mse_scores[self.test_labels == 1]
+        attack_scores = self.ae_mse_scores[self.test_labels == 1]
 
-        type_means = {}
+        type_means: dict = {}
         for label in sorted(attack_labels.unique()):
             mask = attack_labels.values == label
-            type_means[label[:20]] = attack_scores_all[mask].mean()
+            type_means[label[:20]] = attack_scores[mask].mean()
 
         if type_means:
             sorted_types = sorted(type_means.items(), key=lambda x: x[1], reverse=True)
             names = [t[0] for t in sorted_types[:10]]
             values = [t[1] for t in sorted_types[:10]]
             ax.barh(names, values, color="coral")
-            ax.set_xlabel("Mean AE MSE Score")
+            ax.set_xlabel("Mean LSTM AE MSE Score")
             ax.set_title("Top 10 Attack Types by AE Score")
             ax.grid(alpha=0.3, axis="x")
 
@@ -587,11 +899,9 @@ class DeepAutoencoder:
 
         self._plot_roc_pr()
         self._plot_score_cdf()
-        self._plot_per_feature_reconstruction()
         self._plot_latent_tsne()
 
     def _plot_roc_pr(self) -> None:
-        """ROC Curve + Precision-Recall Curve（AE standalone）"""
         from sklearn.metrics import (
             auc,
             average_precision_score,
@@ -607,7 +917,6 @@ class DeepAutoencoder:
         )
         ap = average_precision_score(self.test_labels, self.ae_mse_scores)
 
-        # 最佳 threshold（Youden's J）
         j_scores = tpr - fpr
         best_idx = int(np.argmax(j_scores))
         best_threshold = thresholds[best_idx]
@@ -628,7 +937,7 @@ class DeepAutoencoder:
         )
         ax.set_xlabel("False Positive Rate")
         ax.set_ylabel("True Positive Rate")
-        ax.set_title("ROC Curve (AE Standalone)")
+        ax.set_title("ROC Curve (LSTM AE)")
         ax.legend(loc="lower right")
         ax.grid(alpha=0.3)
 
@@ -636,7 +945,7 @@ class DeepAutoencoder:
         ax.plot(recall, precision, color="steelblue", lw=2, label=f"AP = {ap:.4f}")
         ax.set_xlabel("Recall")
         ax.set_ylabel("Precision")
-        ax.set_title("Precision-Recall Curve (AE Standalone)")
+        ax.set_title("Precision-Recall Curve (LSTM AE)")
         ax.legend()
         ax.grid(alpha=0.3)
 
@@ -659,17 +968,17 @@ class DeepAutoencoder:
             cdf = np.arange(1, len(sorted_s) + 1) / len(sorted_s)
             ax.plot(sorted_s, cdf, label=label, color=color, lw=2)
 
-        # mean+2std threshold 標記
-        threshold = float(normal_scores.mean() + 2 * normal_scores.std())
+        threshold = self.ae_threshold or float(
+            normal_scores.mean() + 1 * normal_scores.std()
+        )
         ax.axvline(
             threshold,
             color="navy",
             linestyle="--",
             lw=1.5,
-            label=f"Threshold (mean+2σ) = {threshold:.4f}",
+            label=f"Threshold (mean+1σ) = {threshold:.4f}",
         )
-
-        ax.set_xlabel("AE MSE Score")
+        ax.set_xlabel("LSTM AE MSE Score")
         ax.set_ylabel("CDF")
         ax.set_title("Cumulative Distribution of Anomaly Scores")
         ax.legend()
@@ -680,84 +989,34 @@ class DeepAutoencoder:
         self.log.info(f"Saved: {plot_path}")
         plt.close()
 
-    def _plot_per_feature_reconstruction(self) -> None:
-        self.lightning_module.eval()
-        self.lightning_module.to(self.device)
-
-        normal_mask = self.test_labels.values == 0
-        attack_mask = self.test_labels.values == 1
-
-        def _get_per_feature_mse(scaled: np.ndarray) -> np.ndarray:
-            results = []
-            batch_size = 2048
-            with torch.no_grad():
-                for start in range(0, len(scaled), batch_size):
-                    batch = torch.FloatTensor(scaled[start : start + batch_size]).to(
-                        self.device
-                    )
-                    recon = self.lightning_module(batch).cpu().numpy()
-                    results.append(
-                        np.square(scaled[start : start + batch_size] - recon)
-                    )
-            return np.mean(np.concatenate(results, axis=0), axis=0)
-
-        normal_mse = _get_per_feature_mse(self.test_features_scaled[normal_mask])
-        attack_mse = _get_per_feature_mse(self.test_features_scaled[attack_mask])
-
-        feature_names = list(self.benign_train.columns)
-        diff = attack_mse - normal_mse
-        sorted_idx = np.argsort(diff)[::-1][:20]
-
-        x = np.arange(len(sorted_idx))
-        width = 0.35
-        fig, ax = plt.subplots(figsize=(12, 7))
-        ax.barh(
-            x + width / 2,
-            normal_mse[sorted_idx[::-1]],
-            width,
-            label="Normal",
-            color="green",
-            alpha=0.7,
-        )
-        ax.barh(
-            x - width / 2,
-            attack_mse[sorted_idx[::-1]],
-            width,
-            label="Attack",
-            color="red",
-            alpha=0.7,
-        )
-        ax.set_yticks(x)
-        ax.set_yticklabels([feature_names[i] for i in sorted_idx[::-1]], fontsize=9)
-        ax.set_xlabel("Mean Reconstruction MSE")
-        ax.set_title("Top 20 Features by Reconstruction Error (Normal vs Attack)")
-        ax.legend()
-        ax.grid(alpha=0.3, axis="x")
-        plt.tight_layout()
-        plot_path = Path("plots") / "deep_ae_feature_reconstruction.png"
-        plt.savefig(plot_path, dpi=150, bbox_inches="tight")
-        self.log.info(f"Saved: {plot_path}")
-        plt.close()
-
     def _plot_latent_tsne(self, n_samples: int = 5000) -> None:
-        """t-SNE 潛在空間視覺化（依攻擊類別上色）"""
         from sklearn.manifold import TSNE
 
         self.lightning_module.eval()
         self.lightning_module.to(self.device)
 
-        total = len(self.test_features_scaled)
+        # Use per-flow sequences so each sample has a latent vector
+        per_flow_seqs = _make_per_flow_sequences(
+            self.test_df,
+            self.test_features_scaled,
+            self.config.window_size,
+        )
+
+        total = len(per_flow_seqs)
         n_samples = min(n_samples, total)
         rng = np.random.default_rng(42)
         idx = rng.choice(total, n_samples, replace=False)
 
-        x_sample = torch.FloatTensor(self.test_features_scaled[idx]).to(self.device)
+        x_sample = torch.FloatTensor(per_flow_seqs[idx]).to(self.device)
         labels_sample = self.test_labels_orig.iloc[idx].values
 
         with torch.no_grad():
             latent = self.lightning_module.model.encode(x_sample).cpu().numpy()
 
-        self.log.info(f"Running t-SNE on {n_samples} samples (latent dim={latent.shape[1]})...")
+        self.log.info(
+            f"Running t-SNE on {n_samples} samples "
+            f"(latent dim={latent.shape[1]})..."
+        )
         tsne = TSNE(n_components=2, random_state=42, perplexity=30, n_jobs=-1)
         latent_2d = tsne.fit_transform(latent)
 
@@ -776,7 +1035,7 @@ class DeepAutoencoder:
                 s=8,
             )
         ax.legend(markerscale=2, fontsize=9)
-        ax.set_title(f"t-SNE of AE Latent Space (n={n_samples})")
+        ax.set_title(f"t-SNE of LSTM AE Latent Space (n={n_samples})")
         ax.set_xlabel("t-SNE 1")
         ax.set_ylabel("t-SNE 2")
         plt.tight_layout()

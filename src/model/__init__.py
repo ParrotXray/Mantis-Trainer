@@ -1,5 +1,5 @@
-from .classifier_config import ClassifierConfig
 from .dataset_config import (
+    SEQUENCE_META_COLUMNS,
     UNIFIED_FEATURE_NAMES,
     DatasetConfig,
     download_dataset,
@@ -13,7 +13,6 @@ from .preprocess_config import PreprocessConfig
 
 __all__ = (
     "DatasetConfig",
-    "ClassifierConfig",
     "DeepAutoencoderConfig",
     "ExportConfig",
     "PreprocessConfig",
@@ -22,5 +21,6 @@ __all__ = (
     "list_available_datasets",
     "download_dataset",
     "UNIFIED_FEATURE_NAMES",
+    "SEQUENCE_META_COLUMNS",
     "UnsupportedDatasetError",
 )
