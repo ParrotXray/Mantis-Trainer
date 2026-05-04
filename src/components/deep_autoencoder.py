@@ -7,7 +7,6 @@ import joblib
 import lightning as L
 import matplotlib
 
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -34,6 +33,7 @@ from sklearn.manifold import TSNE
 from model import SEQUENCE_META_COLUMNS, UNIFIED_FEATURE_NAMES, DeepAutoencoderConfig
 from utils import Logger
 
+matplotlib.use("Agg")
 
 # ---------------------------------------------------------------------------
 # Custom Progress Callback (Docker / non-TTY friendly)
