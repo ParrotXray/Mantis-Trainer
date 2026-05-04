@@ -26,6 +26,87 @@ from utils import Logger
 
 
 # ---------------------------------------------------------------------------
+# Custom Progress Callback (Docker / non-TTY friendly)
+# ---------------------------------------------------------------------------
+
+
+class PlainProgressCallback(L.Callback):
+    """
+    Print-based progress bar using project Logger.
+    Works in Docker logs and any non-TTY environment.
+
+    Timing note:
+      - lr printed in on_train_epoch_start  → already reflects ReduceLROnPlateau
+                                              adjustment from the previous epoch
+      - lr printed in on_validation_epoch_end → current epoch's lr (before scheduler)
+    This lets you clearly see when lr drops between epochs.
+    """
+
+    def __init__(self, logger: Logger, print_every_n_batches: int = 50):
+        super().__init__()
+        self.logger = logger
+        self.print_every_n_batches = print_every_n_batches
+        self._train_loss_sum: float = 0.0
+        self._batch_count: int = 0
+        self._epoch_start: float = 0.0
+
+    def on_train_epoch_start(
+        self, trainer: L.Trainer, pl_module: L.LightningModule
+    ) -> None:
+        import time
+
+        self._epoch_start = time.time()
+        self._train_loss_sum = 0.0
+        self._batch_count = 0
+
+        lr = trainer.optimizers[0].param_groups[0]["lr"]
+        self.logger.info(
+            f"[Epoch {trainer.current_epoch + 1}/{trainer.max_epochs}] "
+            f"Start — {trainer.num_training_batches} batches  lr={lr:.2e}"
+        )
+
+    def on_train_batch_end(
+        self,
+        trainer: L.Trainer,
+        pl_module: L.LightningModule,
+        outputs,
+        batch,
+        batch_idx: int,
+    ) -> None:
+        loss = outputs["loss"].item() if isinstance(outputs, dict) else float(outputs)
+        self._train_loss_sum += loss
+        self._batch_count += 1
+
+        if (batch_idx + 1) % self.print_every_n_batches == 0:
+            avg = self._train_loss_sum / self._batch_count
+            total = trainer.num_training_batches
+            pct = (batch_idx + 1) / total * 100
+            lr = trainer.optimizers[0].param_groups[0]["lr"]
+            self.logger.info(
+                f"  Batch {batch_idx + 1:>5}/{total}  ({pct:5.1f}%)  "
+                f"train_loss={avg:.6f}  lr={lr:.2e}"
+            )
+
+    def on_validation_epoch_end(
+        self, trainer: L.Trainer, pl_module: L.LightningModule
+    ) -> None:
+        import time
+
+        elapsed = time.time() - self._epoch_start
+        m = trainer.callback_metrics
+        lr = trainer.optimizers[0].param_groups[0]["lr"]
+
+        self.logger.info(
+            f"[Epoch {trainer.current_epoch + 1}/{trainer.max_epochs}] "
+            f"Done  {elapsed:.1f}s | "
+            f"train_loss={float(m.get('train_loss', float('nan'))):.6f}  "
+            f"val_loss={float(m.get('val_loss', float('nan'))):.6f}  "
+            f"val_mae={float(m.get('val_mae', float('nan'))):.6f}  "
+            f"lr={lr:.2e}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # LSTM Autoencoder model
 # ---------------------------------------------------------------------------
 
@@ -122,6 +203,7 @@ class LSTMAutoencoderLightningModule(L.LightningModule):
         reduce_lr_factor: float = 0.5,
         reduce_lr_patience: int = 5,
         min_lr: float = 1e-7,
+        latent_norm_weight: float = 0.0,
     ):
         super().__init__()
         self.model = model
@@ -130,6 +212,7 @@ class LSTMAutoencoderLightningModule(L.LightningModule):
         self.reduce_lr_factor = reduce_lr_factor
         self.reduce_lr_patience = reduce_lr_patience
         self.min_lr = min_lr
+        self.latent_norm_weight = latent_norm_weight
         self.loss_fn = nn.MSELoss()
         self.save_hyperparameters(ignore=["model"])
 
@@ -138,10 +221,16 @@ class LSTMAutoencoderLightningModule(L.LightningModule):
 
     def training_step(self, batch: Tuple[torch.Tensor], batch_idx: int) -> torch.Tensor:
         x = batch[0]
+        z = self.model.encode(x)
         x_hat = self(x)
-        loss = self.loss_fn(x_hat, x)
+        recon_loss = self.loss_fn(x_hat, x)
+        latent_norm_loss = torch.mean(z.pow(2))
+        loss = recon_loss + self.latent_norm_weight * latent_norm_loss
         mae = torch.mean(torch.abs(x_hat - x))
         self.log("train_loss", loss, prog_bar=True, on_step=False, on_epoch=True)
+        self.log(
+            "train_recon_loss", recon_loss, prog_bar=False, on_step=False, on_epoch=True
+        )
         self.log("train_mae", mae, prog_bar=False, on_step=False, on_epoch=True)
         return loss
 
@@ -149,10 +238,16 @@ class LSTMAutoencoderLightningModule(L.LightningModule):
         self, batch: Tuple[torch.Tensor], batch_idx: int
     ) -> torch.Tensor:
         x = batch[0]
+        z = self.model.encode(x)
         x_hat = self(x)
-        loss = self.loss_fn(x_hat, x)
+        recon_loss = self.loss_fn(x_hat, x)
+        latent_norm_loss = torch.mean(z.pow(2))
+        loss = recon_loss + self.latent_norm_weight * latent_norm_loss
         mae = torch.mean(torch.abs(x_hat - x))
         self.log("val_loss", loss, prog_bar=True, on_step=False, on_epoch=True)
+        self.log(
+            "val_recon_loss", recon_loss, prog_bar=False, on_step=False, on_epoch=True
+        )
         self.log("val_mae", mae, prog_bar=False, on_step=False, on_epoch=True)
         return loss
 
@@ -301,7 +396,7 @@ class DeepAutoencoder:
 
         # Per-flow anomaly scores on the test set
         self.ae_mse_scores: Optional[np.ndarray] = None
-        self.ae_threshold: Optional[float] = None
+        self.ae_threshold: Optional[Dict[str, float]] = None
 
         self.scaler: Optional[StandardScaler] = None
         self.clip_params: Optional[Dict[str, Dict[str, float]]] = None
@@ -538,6 +633,7 @@ class DeepAutoencoder:
             reduce_lr_factor=self.config.reduce_lr_factor,
             reduce_lr_patience=self.config.reduce_lr_patience,
             min_lr=self.config.min_lr,
+            latent_norm_weight=self.config.latent_norm_weight,
         )
 
         total_params = sum(p.numel() for p in self.autoencoder_model.parameters())
@@ -571,6 +667,10 @@ class DeepAutoencoder:
         os.makedirs("./artifacts", exist_ok=True)
 
         callbacks = [
+            PlainProgressCallback(
+                logger=self.log,
+                print_every_n_batches=50,
+            ),
             EarlyStopping(
                 monitor="val_loss",
                 patience=self.config.early_stopping_patience,
@@ -594,7 +694,7 @@ class DeepAutoencoder:
             accelerator="auto",
             devices=1,
             callbacks=callbacks,
-            enable_progress_bar=True,
+            enable_progress_bar=False,
             gradient_clip_val=self.config.clipnorm,
             log_every_n_steps=50,
             logger=True,
@@ -602,7 +702,7 @@ class DeepAutoencoder:
 
         trainer.fit(self.lightning_module, train_loader, val_loader)
 
-        best_model_path = callbacks[1].best_model_path
+        best_model_path = callbacks[2].best_model_path
         if best_model_path:
             self.lightning_module = LSTMAutoencoderLightningModule.load_from_checkpoint(
                 best_model_path,
@@ -611,7 +711,7 @@ class DeepAutoencoder:
             self.log.info(f"Loaded best model from {best_model_path}")
 
         self.log.info(f"Training completed: {trainer.current_epoch + 1} epochs")
-        self.log.info(f"Best validation loss: {callbacks[1].best_model_score:.6f}")
+        self.log.info(f"Best validation loss: {callbacks[2].best_model_score:.6f}")
 
     def predict_autoencoder(self) -> None:
         """
@@ -654,83 +754,80 @@ class DeepAutoencoder:
             else 0
         )
 
-        attack_mask = self.test_labels == 1
-        attack_scores = self.ae_mse_scores[attack_mask]
-        attack_labels = self.test_labels_orig[attack_mask]
+        candidate_names = [str(p) for p in range(90, 100)] + [
+            "mean+2std",
+            "mean+1std",
+            "Q3+1.5IQR",
+            "Q3+3.0IQR",
+        ]
 
-        candidate_names = [str(p) for p in range(90, 100)] + ["mean+2std", "mean+1std"]
+        q1_val = float(np.percentile(val_scores, 25))
+        q3_val = float(np.percentile(val_scores, 75))
+        iqr_val = q3_val - q1_val
 
-        # Val set candidates → used for threshold selection and export
         val_candidate_values = np.array(
             [float(np.percentile(val_scores, p)) for p in range(90, 100)]
             + [
                 float(val_scores.mean() + 2 * val_scores.std()),
                 float(val_scores.mean() + 1 * val_scores.std()),
+                q3_val + 1.5 * iqr_val,
+                q3_val + 3.0 * iqr_val,
             ]
         )
 
-        # Test set candidates → for evaluation/comparison only
+        q1_test = float(np.percentile(ae_mse_benign, 25))
+        q3_test = float(np.percentile(ae_mse_benign, 75))
+        iqr_test = q3_test - q1_test
+
         test_candidate_values = np.array(
             [float(np.percentile(ae_mse_benign, p)) for p in range(90, 100)]
             + [
                 float(ae_mse_benign.mean() + 2 * ae_mse_benign.std()),
                 float(ae_mse_benign.mean() + 1 * ae_mse_benign.std()),
+                q3_test + 1.5 * iqr_test,
+                q3_test + 3.0 * iqr_test,
             ]
         )
 
-        val_fpr = np.array([(ae_mse_benign > t).mean() for t in val_candidate_values])
-        val_tpr = np.array([(ae_mse_attack > t).mean() for t in val_candidate_values])
-        val_youden = val_tpr - val_fpr
+        # Val FPR — computed from val BENIGN scores only (no leakage)
+        val_fpr = np.array([(val_scores > t).mean() for t in val_candidate_values])
 
         test_fpr = np.array([(ae_mse_benign > t).mean() for t in test_candidate_values])
         test_tpr = np.array([(ae_mse_attack > t).mean() for t in test_candidate_values])
         test_youden = test_tpr - test_fpr
 
-        best_idx = int(np.argmax(val_youden))
-        self.ae_threshold = float(val_candidate_values[best_idx])
-        self.ae_threshold_method = candidate_names[best_idx]
+        # Store all val thresholds as dict — user selects manually after inspecting table
+        self.ae_threshold = dict(zip(candidate_names, val_candidate_values.tolist()))
 
-        # Threshold analysis table (val set candidates)
-        lines = [
-            "\nThreshold Analysis [Val Set Candidates] (exported threshold from this section):"
-        ]
-        lines.append(
-            f"{'Name':<12} {'Threshold':<12} {'FPR':<10} {'TPR':<10} {'Youden':<10}"
-        )
-        lines.append("-" * 54)
-        for name, thresh, fpr_p, tpr_p, youden in zip(
-            candidate_names, val_candidate_values, val_fpr, val_tpr, val_youden
-        ):
-            marker = " <-- best" if name == candidate_names[best_idx] else ""
-            lines.append(
-                f"{name:<12} {thresh:<12.4f} {fpr_p*100:<10.2f}% {tpr_p*100:<10.2f}% {youden:<10.4f}{marker}"
-            )
-        lines.append(
-            f"\nBest: {candidate_names[best_idx]} = {self.ae_threshold:.6f} (Youden={val_youden[best_idx]:.4f})"
-        )
+        lines = ["\nThreshold Analysis [Val Set — BENIGN only]:"]
+        lines.append(f"{'Name':<14} {'Threshold':<14} {'Val FPR':<12}")
+        lines.append("-" * 42)
+        for name, thresh, fpr_p in zip(candidate_names, val_candidate_values, val_fpr):
+            lines.append(f"{name:<14} {thresh:<14.6f} {fpr_p*100:<12.2f}%")
         self.log.info("\n".join(lines))
 
-        # Threshold analysis table (test set candidates, evaluation only)
-        lines = [
-            "\nThreshold Analysis [Test Set Candidates] (evaluation reference only):"
-        ]
+        lines = ["\nThreshold Analysis [Test Set — evaluation only]:"]
         lines.append(
-            f"{'Name':<12} {'Threshold':<12} {'FPR':<10} {'TPR':<10} {'Youden':<10}"
+            f"{'Name':<14} {'Threshold':<14} {'FPR':<10} {'TPR':<10} {'Youden':<10}"
         )
-        lines.append("-" * 54)
+        lines.append("-" * 58)
         for name, thresh, fpr_p, tpr_p, youden in zip(
             candidate_names, test_candidate_values, test_fpr, test_tpr, test_youden
         ):
             lines.append(
-                f"{name:<12} {thresh:<12.4f} {fpr_p*100:<10.2f}% {tpr_p*100:<10.2f}% {youden:<10.4f}"
+                f"{name:<14} {thresh:<14.4f} {fpr_p*100:<10.2f}% {tpr_p*100:<10.2f}% {youden:<10.4f}"
             )
         self.log.info("\n".join(lines))
 
-        thresholds = dict(zip(candidate_names, test_candidate_values.tolist()))
+        attack_mask = self.test_labels == 1
+        attack_scores = self.ae_mse_scores[attack_mask]
+        attack_labels = self.test_labels_orig[attack_mask].reset_index(drop=True)
 
-        # Per-class TPR for each threshold
-        for name, threshold in thresholds.items():
-            lines = [f"\nPer-class TPR @ threshold={threshold:.4f} ({name}):", "=" * 55]
+        for name, threshold in self.ae_threshold.items():
+            lines = [
+                f"\nPer-class TPR @ val threshold={threshold:.4f} ({name}):",
+                "=" * 55,
+            ]
             for label in sorted(attack_labels.unique()):
                 mask = attack_labels.values == label
                 tpr = (attack_scores[mask] > threshold).mean()
@@ -797,10 +894,9 @@ class DeepAutoencoder:
         )
 
         self.log.info(
-            f"\nAE threshold (val set, {self.ae_threshold_method}): {self.ae_threshold:.6f}"
+            f"\nAE val thresholds saved to pkl: {list(self.ae_threshold.keys())}"
         )
 
-        # ---- save PyTorch checkpoint ----
         model_ae_path = Path("artifacts") / "deep_autoencoder.pt"
         torch.save(
             {
@@ -816,15 +912,13 @@ class DeepAutoencoder:
         )
         self.log.info(f"Saved: {model_ae_path}")
 
-        # ---- save config / scaler ----
         config_data = {
             "scaler": self.scaler,
             "clip_params": self.clip_params,
             "encoding_dim": self.config.encoding_dim,
             "window_size": self.config.window_size,
             "feature_names": self._feature_cols,
-            "ae_threshold": self.ae_threshold,
-            "ae_threshold_method": self.ae_threshold_method,
+            "ae_thresholds": self.ae_threshold,
         }
         config_path = Path("artifacts") / "deep_ae_config.pkl"
         joblib.dump(config_data, config_path)
@@ -959,7 +1053,7 @@ class DeepAutoencoder:
         normal_scores = self.ae_mse_scores[self.test_labels == 0]
         attack_scores = self.ae_mse_scores[self.test_labels == 1]
 
-        fig, ax = plt.subplots(figsize=(8, 5))
+        fig, ax = plt.subplots(figsize=(12, 6))
         for scores, label, color in [
             (normal_scores, "Normal", "green"),
             (attack_scores, "Attack", "red"),
@@ -968,20 +1062,24 @@ class DeepAutoencoder:
             cdf = np.arange(1, len(sorted_s) + 1) / len(sorted_s)
             ax.plot(sorted_s, cdf, label=label, color=color, lw=2)
 
-        threshold = self.ae_threshold or float(
-            normal_scores.mean() + 1 * normal_scores.std()
-        )
-        ax.axvline(
-            threshold,
-            color="navy",
-            linestyle="--",
-            lw=1.5,
-            label=f"Threshold (mean+1σ) = {threshold:.4f}",
-        )
+        # Draw all val set threshold candidates as dashed vertical lines
+        thresholds: Dict[str, float] = self.ae_threshold or {}
+        if thresholds:
+            cmap = plt.cm.get_cmap("tab20", len(thresholds))
+            for i, (name, thresh) in enumerate(thresholds.items()):
+                ax.axvline(
+                    thresh,
+                    color=cmap(i),
+                    linestyle="--",
+                    lw=1.2,
+                    alpha=0.85,
+                    label=f"{name} = {thresh:.4f}",
+                )
+
         ax.set_xlabel("LSTM AE MSE Score")
         ax.set_ylabel("CDF")
         ax.set_title("Cumulative Distribution of Anomaly Scores")
-        ax.legend()
+        ax.legend(fontsize=7, loc="lower right", ncol=2)
         ax.grid(alpha=0.3)
         plt.tight_layout()
         plot_path = Path("plots") / "deep_ae_cdf.png"

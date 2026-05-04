@@ -22,8 +22,7 @@ class Exporter:
 
         self.ae_scaler: Optional[Any] = None
         self.ae_clip_params: Optional[Dict[str, Dict[str, float]]] = None
-        self.ae_threshold: Optional[float] = None
-        self.ae_threshold_method: Optional[str] = None
+        self.ae_thresholds: Optional[Dict[str, float]] = None  # dict: name → value
         self.feature_names: Optional[List[str]] = None
         self.encoding_dim: Optional[int] = None
         self.window_size: Optional[int] = None
@@ -89,12 +88,14 @@ class Exporter:
             self.ae_clip_params = ae_config["clip_params"]
             self.encoding_dim = ae_config.get("encoding_dim", 32)
             self.feature_names = ae_config.get("feature_names", UNIFIED_FEATURE_NAMES)
-            self.ae_threshold = ae_config.get("ae_threshold", 0.08)
-            self.ae_threshold_method = ae_config.get("ae_threshold_method", "mean+1std")
             self.window_size = ae_config.get("window_size", self.window_size or 10)
+
+            # ae_thresholds is a dict: name → val threshold value
+            self.ae_thresholds = ae_config.get("ae_thresholds", {})
+
             self.log.info(
                 f"AE config loaded ({len(self.feature_names)} features, "
-                f"threshold={self.ae_threshold:.6f})"
+                f"thresholds={list(self.ae_thresholds.keys())})"
             )
         except Exception as e:
             self.log.error(f"Failed to load AE config: {e}")
@@ -106,7 +107,6 @@ class Exporter:
         self.deep_ae_model.eval()
         input_dim = self.deep_ae_model.input_dim
 
-        # Dummy input: (batch=1, seq_len=window_size, input_dim)
         dummy_input = torch.randn(1, self.window_size, input_dim)
 
         self.deep_ae_onnx_path = Path("exports") / "deep_autoencoder.onnx"
@@ -157,8 +157,7 @@ class Exporter:
                     "encoding_dim": int(self.encoding_dim),
                     "window_size": int(self.window_size),
                     "ae_feature_names": self.feature_names,
-                    "ae_threshold": self.ae_threshold,
-                    "ae_threshold_method": self.ae_threshold_method,
+                    "ae_thresholds": self.ae_thresholds,
                 },
             },
             "preprocessing": {
@@ -178,8 +177,7 @@ class Exporter:
             "ae_scaler_std": ae_scaler_params["std"],
             "ae_post_clip_min": self.config.post_scaling_clip_min,
             "ae_post_clip_max": self.config.post_scaling_clip_max,
-            "ae_threshold": self.ae_threshold,
-            "ae_threshold_method": self.ae_threshold_method,
+            "ae_thresholds": self.ae_thresholds,
             "window_size": int(self.window_size),
         }
 
@@ -202,7 +200,6 @@ class Exporter:
         self.log.info("Verifying LSTM AE ONNX model with end-to-end inference test...")
 
         input_dim = self.deep_ae_model.input_dim
-        # Test with dynamic sequence length (window_size)
         test_input = np.random.randn(1, self.window_size, input_dim).astype(np.float32)
 
         session_ae = ort.InferenceSession(str(self.deep_ae_onnx_path))
@@ -219,22 +216,31 @@ class Exporter:
     def print_summary(self) -> None:
         self.log.info("Export Summary...")
 
-        lines = [
-            "\nModel Information:",
-            f"  Framework   : PyTorch (LSTM Autoencoder)",
-            (
-                f"  LSTM AE     : input_dim={self.deep_ae_model.input_dim}, "
-                f"hidden={self.deep_ae_model.hidden_size}, "
-                f"layers={self.deep_ae_model.num_layers}, "
-                f"bottleneck={self.encoding_dim}, "
-                f"window={self.window_size}"
-            ),
-            f"  Features    : {len(self.feature_names)} flow features",
-            f"  AE threshold: {self.ae_threshold:.6f}",
-            "",
-            "Exported files:",
-            f"  {self.deep_ae_onnx_path}",
-            f"  exports/full_config.json",
-            f"  exports/inference_config.json",
+        threshold_lines = [
+            f"    {name}: {val:.6f}" for name, val in (self.ae_thresholds or {}).items()
         ]
+
+        lines = (
+            [
+                "\nModel Information:",
+                f"  Framework   : PyTorch (LSTM Autoencoder)",
+                (
+                    f"  LSTM AE     : input_dim={self.deep_ae_model.input_dim}, "
+                    f"hidden={self.deep_ae_model.hidden_size}, "
+                    f"layers={self.deep_ae_model.num_layers}, "
+                    f"bottleneck={self.encoding_dim}, "
+                    f"window={self.window_size}"
+                ),
+                f"  Features    : {len(self.feature_names)} flow features",
+                f"  AE thresholds (val set):",
+            ]
+            + threshold_lines
+            + [
+                "",
+                "Exported files:",
+                f"  {self.deep_ae_onnx_path}",
+                f"  exports/full_config.json",
+                f"  exports/inference_config.json",
+            ]
+        )
         self.log.info("\n".join(lines))

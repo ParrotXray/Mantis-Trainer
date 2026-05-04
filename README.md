@@ -1,44 +1,74 @@
 # NetGuardia-Trainer
 
-A machine learning training pipeline for network intrusion detection models. Trains Deep Autoencoder and LightGBM classifier on multiple datasets and exports to ONNX format for deployment with [NetGuardia](https://github.com/ParrotXray/NetGuardia).
+A machine learning training pipeline for the [NetGuardia](https://github.com/ParrotXray/NetGuardia) network intrusion detection system. Trains an LSTM Autoencoder on real-world BENIGN traffic and exports to ONNX format for deployment.
 
 ## Overview
 
-NetGuardia-Trainer provides a complete pipeline for training network anomaly detection and classification models:
+NetGuardia-Trainer implements a two-stage pipeline:
 
-1. **Data Preprocessing** - Loads multiple datasets (CIC-IDS-2017, CIC-IDS-2018, CIC-UNSW-NB15), maps to a unified 26-feature schema, and normalizes labels
-2. **Deep Autoencoder** - Trains an autoencoder on 15 common features for unsupervised anomaly detection
-3. **LightGBM Classifier** - Trains a gradient boosted tree classifier on all 36 features for multi-class attack classification
-4. **ONNX Export** - Exports trained models to ONNX format for cross-platform inference
+1. **Data Preprocessing** — Loads multiple datasets, maps to a unified 39-feature schema, and normalizes labels
+2. **LSTM Autoencoder** — Trains an unsupervised autoencoder on BENIGN-only traffic for anomaly detection
+3. **ONNX Export** — Exports the trained model and inference configuration for deployment with NetGuardia
+
+The autoencoder learns the normal traffic distribution from real laboratory traffic. During inference, flows with high reconstruction error are flagged as anomalies.
+
+## Architecture
+
+```
+Input (39 features, window=10)
+    → LSTM Encoder (2 layers, hidden=128)
+    → Bottleneck (encoding_dim=32)
+    → LSTM Decoder (2 layers, hidden=128)
+    → Reconstruction (39 features)
+
+Anomaly Score = MSE(input, reconstruction)
+```
+
+Training uses a latent norm penalty (`||z||²`) to compress BENIGN latent vectors toward the origin, improving separation from unseen attack flows.
 
 ## Supported Datasets
 
-Datasets are **auto-downloaded** from Kaggle via [kagglehub](https://github.com/Kaggle/kagglehub). No manual download required.
+Datasets are **auto-downloaded** from Kaggle via [kagglehub](https://github.com/Kaggle/kagglehub).
 
-| Dataset | Kaggle ID | Use Features | Use File |
-|---------|-----------|----------|----------|
-| CIC-IDS-2017 | `chethuhn/network-intrusion-dataset` | 26 | `all` |
-| CIC-IDS-2018 | `dhoogla/csecicids2018` | 26 | `all` |
-| CIC-UNSW-NB15 | `yasserhessein/cic-unsw-nb15-augmented-dataset` | 26 | `CICFlowMeter.csv` |
+### Training (BENIGN only)
 
-When merged, the unified schema has **26 features** total. Missing features are NaN (handled natively by LightGBM).
+| Dataset | Kaggle ID | Description |
+|---------|-----------|-------------|
+| LAB-301 | `ruiluncai/lab301-timestamp-benign-dataset` | Real lab traffic (YouTube, Speedtest, browsing) with timestamps |
+
+### Testing (Attack evaluation)
+
+| Dataset | Kaggle ID | Description |
+|---------|-----------|-------------|
+| CIC-IDS-2017 + FLNET2023 | `ruiluncai/attack-test-dataset` | CIC-IDS-2017 standard benchmark + FLNET2023 modern attacks (DoS, DDoS, Infiltration, SQL Injection, XSS, Command Injection) |
+
+### Unified Feature Schema (39 features)
+
+| Category | Features |
+|----------|----------|
+| Flow | `flow_duration`, `flow_bytes_per_sec`, `flow_pkts_per_sec` |
+| Packet counts | `fwd_packets`, `bwd_packets`, `fwd_bytes`, `bwd_bytes` |
+| Packet length | `fwd_pkt_len_mean/std`, `bwd_pkt_len_mean/std`, `pkt_len_mean/std` |
+| IAT | `fwd_iat_mean`, `bwd_iat_mean`, `flow_iat_mean/std/max/min` |
+| Window | `fwd_win_bytes`, `bwd_win_bytes` |
+| Flags | `psh_flag_cnt`, `ack_flag_cnt`, `syn_flag_cnt`, `fin_flag_cnt`, `rst_flag_cnt` |
+| Misc | `dst_port`, `protocol`, `fwd_seg_size_min`, `fwd_act_data_pkts`, `down_up_ratio` |
+| Active/Idle | `active_mean/std/max/min`, `idle_mean/std/max/min` |
 
 ## Requirements
 
 - Python >= 3.10
 - NVIDIA GPU with CUDA support (recommended)
-- 50 GB or more free disk space for datasets and models 
-- 40 GB RAM or more (for training on full datasets)
+- 32 GB RAM or more
+- 20 GB free disk space
 
 ### Dependencies
 
 - PyTorch and PyTorch Lightning for deep learning
-- LightGBM for gradient boosted classification
 - scikit-learn for preprocessing
-- imbalanced-learn for SMOTE oversampling
-- ONNX, onnxruntime, onnxmltools for model export
+- ONNX, onnxruntime for model export
 - kagglehub for dataset auto-download
-- pandas and numpy for data processing
+- pandas, numpy for data processing
 
 See `requirements.txt` for the complete list.
 
@@ -60,51 +90,49 @@ chmod +x main.py
 ### Run Complete Pipeline
 
 ```bash
-# Single dataset (auto-download)
-./main.py -s cic2018 -a
-
-# Merge two datasets
-./main.py -s cic2018,unsw -a
-
-# All three datasets
-./main.py -s cic2017,cic2018,unsw -a
+./main.py -s lab301,test -a
 ```
 
 ### Run Individual Stages
 
 ```bash
 # Data preprocessing only
-./main.py -s cic2018 -dp
+./main.py -s lab301,test -dp
 
-# Train Deep Autoencoder only
+# Train LSTM Autoencoder only
 ./main.py -da
 
-# Train LightGBM Classifier only
-./main.py -cl
-
-# Export models to ONNX only
+# Export model to ONNX only
 ./main.py -ep
-```
-
-### Use Local Dataset Paths
-
-If you already have datasets downloaded locally, override auto-download with `--path`:
-
-```bash
-./main.py -s cic2018,unsw --path "/data/cic2018,/data/unsw" -a
 ```
 
 ### Command Line Arguments
 
 | Argument | Description |
 |----------|-------------|
-| `-s, --set` | Dataset name(s), comma-separated (`cic2017`, `cic2018`, `unsw`) |
+| `-s, --set` | Dataset name(s), comma-separated (`lab301`, `test`) |
 | `--path` | Optional: local path(s) to dataset directories (overrides auto-download) |
-| `-a, --all` | Run complete training pipeline |
+| `-a, --all` | Run complete pipeline |
 | `-dp, --datapreprocess` | Run data preprocessing |
-| `-da, --deepautoencoder` | Train Deep Autoencoder model |
-| `-cl, --classifier` | Train LightGBM classifier |
-| `-ep, --export` | Export models to ONNX format |
+| `-da, --deepautoencoder` | Train LSTM Autoencoder |
+| `-ep, --export` | Export model to ONNX |
+
+## Threshold Selection
+
+After training, the pipeline prints a threshold analysis table derived from the **BENIGN-only validation set** (no attack labels involved):
+
+```
+Threshold Analysis [Val Set — BENIGN only]:
+Name           Threshold       Val FPR
+------------------------------------------
+90             0.012345        10.00%
+91             0.015678         9.00%
+...
+Q3+1.5IQR      0.011234        10.02%
+Q3+3.0IQR      0.018901         5.62%
+```
+
+All threshold candidates are exported to `artifacts/deep_ae_config.pkl` under the key `ae_thresholds`. Select the threshold that meets your FPR tolerance and configure it in NetGuardia's `inference_config.json`.
 
 ## Docker
 
@@ -117,29 +145,13 @@ docker pull ghcr.io/parrotxray/netguardia-trainer:master
 ### Run with Docker
 
 ```bash
-# Full pipeline with auto-download
 docker run --gpus all \
   -v ./src/outputs:/app/src/outputs \
   -v ./src/artifacts:/app/src/artifacts \
-  -v ./src/metadata:/app/src/metadata \
   -v ./src/plots:/app/src/plots \
   -v ./src/exports:/app/src/exports \
   -v ./src/logs:/app/src/logs \
-  -e DATASET="cic2018,cic2017,cicdos2017,cic2019,unsw" \
-  -e ALL=true \
-  ghcr.io/parrotxray/netguardia-trainer:master
-
-# With local dataset (mount data directory)
-docker run --gpus all \
-  -v /path/to/datasets:/data \
-  -v ./src/outputs:/app/src/outputs \
-  -v ./src/artifacts:/app/src/artifacts \
-  -v ./src/metadata:/app/src/metadata \
-  -v ./src/plots:/app/src/plots \
-  -v ./src/exports:/app/src/exports \
-  -v ./src/logs:/app/src/logs \
-  -e DATASET="cic2018,cic2017,cicdos2017,cic2019,unsw" \
-  -e DATAPATH="/data/cic2018,/data/cic2017,/data/cicdos2017,/data/cic2019,/data/unsw" \
+  -e DATASET="lab301,test" \
   -e ALL=true \
   ghcr.io/parrotxray/netguardia-trainer:master
 ```
@@ -153,7 +165,6 @@ docker run --gpus all \
 | `ALL` | Run complete pipeline (`true`/`false`) |
 | `DATAPREPROCESS` | Run preprocessing (`true`/`false`) |
 | `DEEPAUTOENCODER` | Train autoencoder (`true`/`false`) |
-| `CLASSIFIER` | Train classifier (`true`/`false`) |
 | `EXPORT` | Export to ONNX (`true`/`false`) |
 
 ### Build Docker Image Locally
@@ -166,16 +177,19 @@ docker build -t netguardia-trainer .
 
 | Directory | Contents |
 |-----------|----------|
-| `outputs/` | Processed CSV files (benign/attack splits) |
-| `artifacts/` | Trained model files (PyTorch, LightGBM) |
-| `metadata/` | Model configurations, label encoders, stats |
-| `plots/` | Training visualizations and analysis plots |
-| `exports/` | ONNX models and inference config JSON |
-| `log/` | Process output records |
+| `outputs/` | Processed CSV files (benign/attack splits, AE scores) |
+| `artifacts/` | Trained model files (PyTorch checkpoint, ONNX, config pkl) |
+| `plots/` | Training visualizations (ROC, PR curve, t-SNE, score distribution) |
+| `exports/` | ONNX model and inference config JSON |
+| `logs/` | Process output records |
+
+## Limitations
+
+- Attack evaluation uses CIC-IDS-2017 (2017) and FLNET2023 (2023) benchmark datasets generated in controlled environments. Some attack categories (Exploitation, Reconnaissance) exhibit flow-level statistical features similar to BENIGN traffic, resulting in lower detection rates. This is a known limitation of flow-based NIDS datasets [Dube 2024, Engelen et al. 2021].
+- The autoencoder is trained on BENIGN-only traffic. Detection capability for novel attacks depends on how much their flow statistics deviate from normal behaviour.
 
 ## Acknowledgments
 
 - Canadian Institute for Cybersecurity for the CIC-IDS datasets
-- UNSW Canberra for the UNSW-NB15 dataset
+- FLNET2023 dataset authors
 - PyTorch and PyTorch Lightning teams
-- LightGBM team

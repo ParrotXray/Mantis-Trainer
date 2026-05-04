@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
@@ -11,13 +11,13 @@ class DeepAutoencoderConfig:
     fill_value: float = 0.0
 
     # Sequence Parameters
-    window_size: int = 10  # number of consecutive flows per sequence
-    stride: int = 1  # sliding-window step (training)
+    window_size: int = 10
+    stride: int = 1
 
     # LSTM Architecture Parameters
     hidden_size: int = 128
-    num_layers: int = 2
-    encoding_dim: int = 32  # bottleneck dimension
+    num_layers: int = 4
+    encoding_dim: int = 32
     dropout: float = 0.2
 
     # Training Parameters
@@ -31,5 +31,10 @@ class DeepAutoencoderConfig:
     reduce_lr_factor: float = 0.5
     min_lr: float = 1e-7
     split_random_state: int = 42
-
     test_split: float = 0.20
+
+    # Latent Norm Penalty
+    # Adds ||z||^2 to training loss to compress BENIGN latent vectors
+    # toward the origin, widening the gap with unseen attack flows.
+    # Set to 0.0 to disable (original behaviour).
+    latent_norm_weight: float = 1e-3
