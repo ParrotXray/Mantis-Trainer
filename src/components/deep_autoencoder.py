@@ -44,12 +44,6 @@ class PlainProgressCallback(L.Callback):
     """
     Print-based progress bar using project Logger.
     Works in Docker logs and any non-TTY environment.
-
-    Timing note:
-      - lr printed in on_train_epoch_start  → already reflects ReduceLROnPlateau
-                                              adjustment from the previous epoch
-      - lr printed in on_validation_epoch_end → current epoch's lr (before scheduler)
-    This lets you clearly see when lr drops between epochs.
     """
 
     def __init__(self, logger: Logger, print_every_n_batches: int = 50):
@@ -58,12 +52,11 @@ class PlainProgressCallback(L.Callback):
         self.print_every_n_batches = print_every_n_batches
         self._train_loss_sum: float = 0.0
         self._batch_count: int = 0
-        self._epoch_start: float = 0.0
+        self._epoch_start: float = time.time()
 
     def on_train_epoch_start(
         self, trainer: L.Trainer, pl_module: L.LightningModule
     ) -> None:
-
         self._epoch_start = time.time()
         self._train_loss_sum = 0.0
         self._batch_count = 0
@@ -98,6 +91,9 @@ class PlainProgressCallback(L.Callback):
     def on_validation_epoch_end(
         self, trainer: L.Trainer, pl_module: L.LightningModule
     ) -> None:
+        # Skip sanity check (batch_count == 0 means no training happened yet)
+        if self._batch_count == 0:
+            return
 
         elapsed = time.time() - self._epoch_start
         m = trainer.callback_metrics
