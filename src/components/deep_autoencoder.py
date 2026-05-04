@@ -1,4 +1,5 @@
 import os
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -12,14 +13,23 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+
+from torch.utils.data import DataLoader, TensorDataset
 from lightning.pytorch.callbacks import (
     EarlyStopping,
     LearningRateMonitor,
     ModelCheckpoint,
 )
+
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-from torch.utils.data import DataLoader, TensorDataset
+from sklearn.metrics import (
+    auc,
+    average_precision_score,
+    precision_recall_curve,
+    roc_curve,
+)
+from sklearn.manifold import TSNE
 
 from model import SEQUENCE_META_COLUMNS, UNIFIED_FEATURE_NAMES, DeepAutoencoderConfig
 from utils import Logger
@@ -53,7 +63,6 @@ class PlainProgressCallback(L.Callback):
     def on_train_epoch_start(
         self, trainer: L.Trainer, pl_module: L.LightningModule
     ) -> None:
-        import time
 
         self._epoch_start = time.time()
         self._train_loss_sum = 0.0
@@ -83,14 +92,12 @@ class PlainProgressCallback(L.Callback):
             pct = (batch_idx + 1) / total * 100
             lr = trainer.optimizers[0].param_groups[0]["lr"]
             self.logger.info(
-                f"  Batch {batch_idx + 1:>5}/{total}  ({pct:5.1f}%)  "
-                f"train_loss={avg:.6f}  lr={lr:.2e}"
+                f"Batch {batch_idx + 1:>5}/{total} ({pct:5.1f}%) train_loss={avg:.6f} lr={lr:.2e}"
             )
 
     def on_validation_epoch_end(
         self, trainer: L.Trainer, pl_module: L.LightningModule
     ) -> None:
-        import time
 
         elapsed = time.time() - self._epoch_start
         m = trainer.callback_metrics
@@ -98,7 +105,7 @@ class PlainProgressCallback(L.Callback):
 
         self.logger.info(
             f"[Epoch {trainer.current_epoch + 1}/{trainer.max_epochs}] "
-            f"Done  {elapsed:.1f}s | "
+            f"Done {elapsed:.1f}s | "
             f"train_loss={float(m.get('train_loss', float('nan'))):.6f}  "
             f"val_loss={float(m.get('val_loss', float('nan'))):.6f}  "
             f"val_mae={float(m.get('val_mae', float('nan'))):.6f}  "
@@ -996,13 +1003,6 @@ class DeepAutoencoder:
         self._plot_latent_tsne()
 
     def _plot_roc_pr(self) -> None:
-        from sklearn.metrics import (
-            auc,
-            average_precision_score,
-            precision_recall_curve,
-            roc_curve,
-        )
-
         fpr, tpr, thresholds = roc_curve(self.test_labels, self.ae_mse_scores)
         roc_auc = auc(fpr, tpr)
 
@@ -1088,8 +1088,6 @@ class DeepAutoencoder:
         plt.close()
 
     def _plot_latent_tsne(self, n_samples: int = 5000) -> None:
-        from sklearn.manifold import TSNE
-
         self.lightning_module.eval()
         self.lightning_module.to(self.device)
 
