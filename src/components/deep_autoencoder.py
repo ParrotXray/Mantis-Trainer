@@ -657,6 +657,7 @@ class DeepAutoencoder:
             num_workers=num_workers,
             pin_memory=torch.cuda.is_available(),
             persistent_workers=num_workers > 0,
+            prefetch_factor=2 if num_workers > 0 else None,
         )
         val_loader = DataLoader(
             val_dataset,
@@ -665,6 +666,7 @@ class DeepAutoencoder:
             num_workers=num_workers,
             pin_memory=torch.cuda.is_available(),
             persistent_workers=num_workers > 0,
+            prefetch_factor=2 if num_workers > 0 else None,
         )
 
         os.makedirs("./artifacts", exist_ok=True)
