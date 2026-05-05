@@ -648,7 +648,7 @@ class DeepAutoencoder:
         train_dataset = TensorDataset(torch.FloatTensor(self.train_sequences))
         val_dataset = TensorDataset(torch.FloatTensor(self.val_sequences))
 
-        num_workers = 4 if os.name != "nt" else 0
+        num_workers = min(4, os.cpu_count() or 1)
 
         train_loader = DataLoader(
             train_dataset,
