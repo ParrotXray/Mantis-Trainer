@@ -26,6 +26,7 @@ class Exporter:
         self.feature_names: Optional[List[str]] = None
         self.encoding_dim: Optional[int] = None
         self.window_size: Optional[int] = None
+        self.inference_batch_size: Optional[int] = None
 
         self.deep_ae_onnx_path: Optional[Path] = None
 
@@ -89,7 +90,7 @@ class Exporter:
             self.encoding_dim = ae_config.get("encoding_dim", 32)
             self.feature_names = ae_config.get("feature_names", UNIFIED_FEATURE_NAMES)
             self.window_size = ae_config.get("window_size", self.window_size or 10)
-
+            self.inference_batch_size = ae_config.get("inference_batch_size", 1024)
             # ae_thresholds is a dict: name → val threshold value
             self.ae_thresholds = ae_config.get("ae_thresholds", {})
 
@@ -117,7 +118,7 @@ class Exporter:
             self.deep_ae_onnx_path,
             export_params=True,
             opset_version=self.config.opset_version,
-            do_constant_folding=True,
+            do_constant_folding=False,
             input_names=["input"],
             output_names=["output"],
             dynamo=False,
@@ -179,6 +180,7 @@ class Exporter:
             "ae_post_clip_max": self.config.post_scaling_clip_max,
             "ae_thresholds": self.ae_thresholds,
             "window_size": int(self.window_size),
+            "inference_batch_size": self.inference_batch_size,
         }
 
     def save_config_json(self) -> None:
@@ -244,3 +246,54 @@ class Exporter:
             ]
         )
         self.log.info("\n".join(lines))
+
+    def verify_onnx_export(self, atol: float = 1e-4) -> None:
+        """
+        Verify that the exported ONNX model matches PyTorch output.
+        Tests two things:
+        1. Numerical agreement between PyTorch and ONNX for the same input.
+        2. ONNX output actually varies across different inputs (catches constant-folded decoder h_0).
+        """
+        self.log.info("Verifying ONNX export correctness...")
+
+        num_features = self.deep_ae_model.input_dim
+        window_size = self.window_size
+
+        sess = ort.InferenceSession(str(self.deep_ae_onnx_path))
+        input_name = sess.get_inputs()[0].name
+        self.deep_ae_model.eval()
+
+        ort_outputs = []
+        max_diffs = []
+
+        for i in range(4):
+            x = torch.randn(1, window_size, num_features)
+            x_np = x.numpy().astype(np.float32)
+
+            with torch.no_grad():
+                pt_out = self.deep_ae_model(x).numpy()
+
+            ort_out = sess.run(None, {input_name: x_np})[0]
+            ort_outputs.append(ort_out)
+
+            max_diff = float(np.abs(pt_out - ort_out).max())
+            max_diffs.append(max_diff)
+
+            if max_diff > atol:
+                raise AssertionError(
+                    f"[input {i}] PyTorch vs ONNX max diff {max_diff:.6f} exceeds atol {atol}"
+                )
+
+        variation = max(np.abs(ort_outputs[0] - ort_outputs[j]).max() for j in range(1, len(ort_outputs)))
+        if variation < 1e-6:
+            raise AssertionError(
+                "ONNX outputs are identical across different inputs — "
+                "decoder h_0 was likely constant-folded. Re-export with do_constant_folding=False."
+            )
+
+        self.log.info(
+            f"ONNX verification passed | "
+            f"inputs tested: {len(ort_outputs)} | "
+            f"max PyTorch/ONNX diff: {max(max_diffs):.2e} | "
+            f"output variation across inputs: {variation:.2e}"
+        )

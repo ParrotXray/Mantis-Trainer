@@ -861,11 +861,10 @@ class DeepAutoencoder:
 
         n = len(sequences)
         mse_scores = np.zeros(n, dtype=np.float32)
-        batch_size = 512
 
         with torch.no_grad():
-            for start in range(0, n, batch_size):
-                end = min(start + batch_size, n)
+            for start in range(0, n, self.config.inference_batch_size):
+                end = min(start + self.config.inference_batch_size, n)
                 batch = torch.FloatTensor(sequences[start:end]).to(self.device)
                 recon = self.lightning_module(batch).cpu().numpy()
                 # Mean over (W, F) → scalar per sample
@@ -912,6 +911,7 @@ class DeepAutoencoder:
                 "encoding_dim": self.autoencoder_model.encoding_dim,
                 "dropout": self.config.dropout,
                 "window_size": self.config.window_size,
+                "inference_batch_size": self.config.inference_batch_size,
             },
             model_ae_path,
         )
@@ -922,6 +922,7 @@ class DeepAutoencoder:
             "clip_params": self.clip_params,
             "encoding_dim": self.config.encoding_dim,
             "window_size": self.config.window_size,
+            "inference_batch_size": self.config.inference_batch_size,
             "feature_names": self._feature_cols,
             "ae_thresholds": self.ae_threshold,
         }

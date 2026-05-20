@@ -150,6 +150,7 @@ Available datasets: {', '.join(available)}
                 ep.build_config_json()
                 ep.save_config_json()
                 ep.verify_onnx_models()
+                ep.verify_onnx_export()
                 ep.print_summary()
 
         export_end = time.perf_counter()
