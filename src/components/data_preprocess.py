@@ -39,10 +39,6 @@ class DataPreprocess:
 
         self.log: Logger = Logger(__name__)
 
-    # ------------------------------------------------------------------
-    # Timestamp parsing
-    # ------------------------------------------------------------------
-
     # Explicit format list covers all known CIC/UNSW dataset variants.
     # Tried in order; first one where >50% of values parse is used.
     _TS_FORMATS: Final[List[str]] = [
@@ -61,38 +57,23 @@ class DataPreprocess:
 
     @staticmethod
     def _parse_timestamp_ms(series: pd.Series) -> pd.Series:
-        """
-        Convert a timestamp column to int64 milliseconds (sortable).
-
-        Tried in order:
-        1. Already numeric → used as-is
-        2. Explicit datetime formats (see _TS_FORMATS)
-        3. Generic pd.to_datetime fallback
-        4. Colon-separated time strings: HH:MM:SS[.f] or MM:SS[.f]
-
-        Unparseable values become -1 (sort safely to front).
-        """
-        # 1. numeric
         numeric = pd.to_numeric(series, errors="coerce")
         if numeric.notna().mean() > 0.5:
             return numeric.fillna(-1).astype("int64")
 
-        # 2. explicit formats
         for fmt in DataPreprocess._TS_FORMATS:
             ts = pd.to_datetime(series, format=fmt, errors="coerce")
             if ts.notna().mean() > 0.5:
                 return (ts.astype("int64") // 1_000_000).where(ts.notna(), other=-1)
 
-        # 3. generic parser
         ts = pd.to_datetime(series, errors="coerce")
         if ts.notna().mean() > 0.5:
             return (ts.astype("int64") // 1_000_000).where(ts.notna(), other=-1)
 
-        # 4. colon-separated time-only: "HH:MM:SS[.f]" or "MM:SS[.f]"
         def _time_to_ms(val: str) -> int:
             try:
                 parts = str(val).strip().split(":")
-                if len(parts) == 3:  # HH:MM:SS[.f]
+                if len(parts) == 3:
                     return int(
                         (
                             float(parts[0]) * 3600
@@ -101,7 +82,7 @@ class DataPreprocess:
                         )
                         * 1000
                     )
-                elif len(parts) == 2:  # MM:SS[.f]
+                elif len(parts) == 2:
                     return int((float(parts[0]) * 60 + float(parts[1])) * 1000)
             except Exception:
                 pass
@@ -126,7 +107,6 @@ class DataPreprocess:
         header_file: str = "",
         header_name_column: str = "",
     ) -> List[pd.DataFrame]:
-        """Load CSV file(s) from a path (file or directory)."""
         p = Path(path)
         frames = []
 
@@ -138,7 +118,6 @@ class DataPreprocess:
             self.log.warning(f"Invalid path: {path}")
             return frames
 
-        # Load column names from header file if specified (for headerless CSVs)
         col_names = None
         if header_file and p.is_dir():
             header_path = p / header_file
@@ -179,7 +158,6 @@ class DataPreprocess:
         return frames
 
     def load_datasets(self) -> None:
-        """Load all datasets and apply column mappings to unified schema."""
         all_frames: List[pd.DataFrame] = []
 
         for ds_config, path in zip(self.dataset_configs, self.paths):
@@ -204,13 +182,11 @@ class DataPreprocess:
             # Extract labels BEFORE column mapping (uses original column names)
             labels = ds_config.extract_labels(combined_raw)
 
-            # Apply column mapping
             mapped = ds_config.map_columns(combined_raw)
 
             # Compute derived features (e.g. UNSW needs flow_bytes_per_sec)
             mapped = ds_config.compute_derived(mapped)
 
-            # Attach normalized labels
             mapped["_label"] = labels.values
             mapped["_source"] = ds_config.name
 
@@ -226,7 +202,6 @@ class DataPreprocess:
         )
 
     def statistics_dataset(self) -> None:
-        """Print label distribution statistics."""
         if self.combined_data is None:
             raise ValueError("No combined data. Call load_datasets() first!")
 
@@ -257,13 +232,11 @@ class DataPreprocess:
             self.log.info("\n".join(lines))
 
     def feature_preparation(self) -> None:
-        """Extract unified feature matrix (27 features + sequence metadata), NaN for missing."""
         if self.combined_data is None:
             raise ValueError("No combined data. Call load_datasets() first!")
 
         self.log.info("Feature preparation (unified schema)...")
 
-        # Select only unified feature columns that exist
         available = [
             f for f in UNIFIED_FEATURE_NAMES if f in self.combined_data.columns
         ]
@@ -275,7 +248,6 @@ class DataPreprocess:
         if missing:
             self.log.info(f"Missing features (will be NaN): {sorted(missing)}")
 
-        # Build feature matrix with all unified columns
         self.feature_matrix = pd.DataFrame(index=self.combined_data.index)
         for feat in UNIFIED_FEATURE_NAMES:
             if feat in self.combined_data.columns:
@@ -288,15 +260,13 @@ class DataPreprocess:
         # Clean inf values (but preserve NaN for missing features)
         self.feature_matrix = self.feature_matrix.replace([np.inf, -np.inf], np.nan)
 
-        # Clip extreme values (only for non-NaN)
         for col in self.feature_matrix.columns:
             mask = self.feature_matrix[col].notna()
             self.feature_matrix.loc[mask, col] = self.feature_matrix.loc[
                 mask, col
             ].clip(self.config.clip_min, self.config.clip_max)
 
-        # Preserve sequence metadata — timestamp is converted to int64 ms
-        # so that sort_values("timestamp") always gives correct temporal order.
+        # Timestamp converted to int64 ms so sort_values("timestamp") gives correct temporal order.
         for meta_col in SEQUENCE_META_COLUMNS:
             if meta_col not in self.combined_data.columns:
                 continue
@@ -323,7 +293,6 @@ class DataPreprocess:
             self.log.info(f"Sequence metadata preserved: {meta_present}")
 
     def output_result(self) -> None:
-        """Save preprocessed data: benign and attack CSVs."""
         if self.feature_matrix is None or self.labels is None:
             raise ValueError("No feature matrix. Call feature_preparation() first!")
 

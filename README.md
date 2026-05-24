@@ -1,14 +1,14 @@
-# NetGuardia-Trainer
+# Mantis-Trainer
 
-A machine learning training pipeline for the [NetGuardia](https://github.com/ParrotXray/NetGuardia) network intrusion detection system. Trains an LSTM Autoencoder on real-world BENIGN traffic and exports to ONNX format for deployment.
+A machine learning training pipeline for the [Mantis](https://github.com/ParrotXray/Mantis) network intrusion detection system. Trains an LSTM Autoencoder on real-world BENIGN traffic and exports to ONNX format for deployment.
 
 ## Overview
 
-NetGuardia-Trainer implements a two-stage pipeline:
+Mantis-Trainer implements a two-stage pipeline:
 
 1. **Data Preprocessing** — Loads multiple datasets, maps to a unified 39-feature schema, and normalizes labels
 2. **LSTM Autoencoder** — Trains an unsupervised autoencoder on BENIGN-only traffic for anomaly detection
-3. **ONNX Export** — Exports the trained model and inference configuration for deployment with NetGuardia
+3. **ONNX Export** — Exports the trained model and inference configuration for deployment with Mantis
 
 The autoencoder learns the normal traffic distribution from real laboratory traffic. During inference, flows with high reconstruction error are flagged as anomalies.
 
@@ -75,8 +75,8 @@ See `requirements.txt` for the complete list.
 ## Installation
 
 ```bash
-git clone https://github.com/ParrotXray/NetGuardia-Trainer.git
-cd NetGuardia-Trainer
+git clone https://github.com/ParrotXray/Mantis-Trainer.git
+cd Mantis-Trainer
 pip3 install -r requirements.txt
 ```
 
@@ -132,14 +132,14 @@ Q3+1.5IQR      0.011234        10.02%
 Q3+3.0IQR      0.018901         5.62%
 ```
 
-All threshold candidates are exported to `artifacts/deep_ae_config.pkl` under the key `ae_thresholds`. Select the threshold that meets your FPR tolerance and configure it in NetGuardia's `inference_config.json`.
+All threshold candidates are exported to `artifacts/deep_ae_config.pkl` under the key `ae_thresholds`. Select the threshold that meets your FPR tolerance and configure it in Mantis's `inference_config.json`.
 
 ## Docker
 
 ### Pull Pre-built Image
 
 ```bash
-docker pull ghcr.io/parrotxray/netguardia-trainer:master
+docker pull ghcr.io/parrotxray/mantis-trainer:master
 ```
 
 ### Run with Docker
@@ -153,7 +153,7 @@ docker run --gpus all \
   -v ./src/logs:/app/src/logs \
   -e DATASET="lab301,test" \
   -e ALL=true \
-  ghcr.io/parrotxray/netguardia-trainer:master
+  ghcr.io/parrotxray/mantis-trainer:master
 ```
 
 ### Environment Variables
@@ -170,7 +170,7 @@ docker run --gpus all \
 ### Build Docker Image Locally
 
 ```bash
-docker build -t netguardia-trainer .
+docker build -t mantis-trainer .
 ```
 
 ## Output Directories

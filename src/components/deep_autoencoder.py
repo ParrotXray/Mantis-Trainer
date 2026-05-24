@@ -35,16 +35,9 @@ from utils import Logger
 
 matplotlib.use("Agg")
 
-# ---------------------------------------------------------------------------
-# Custom Progress Callback (Docker / non-TTY friendly)
-# ---------------------------------------------------------------------------
-
 
 class PlainProgressCallback(L.Callback):
-    """
-    Print-based progress bar using project Logger.
-    Works in Docker logs and any non-TTY environment.
-    """
+    """Print-based progress for Docker / non-TTY environments."""
 
     def __init__(self, logger: Logger, print_every_n_batches: int = 50):
         super().__init__()
@@ -109,19 +102,7 @@ class PlainProgressCallback(L.Callback):
         )
 
 
-# ---------------------------------------------------------------------------
-# LSTM Autoencoder model
-# ---------------------------------------------------------------------------
-
-
 class LSTMAutoencoderModel(nn.Module):
-    """
-    Sequence-to-sequence LSTM autoencoder for temporal flow anomaly detection.
-
-    Encoder:  LSTM  →  linear bottleneck (encoding_dim)
-    Decoder:  repeat bottleneck × seq_len  →  LSTM  →  linear output
-    """
-
     def __init__(
         self,
         input_dim: int,
@@ -138,7 +119,6 @@ class LSTMAutoencoderModel(nn.Module):
 
         lstm_dropout = dropout if num_layers > 1 else 0.0
 
-        # Encoder
         self.encoder_lstm = nn.LSTM(
             input_size=input_dim,
             hidden_size=hidden_size,
@@ -148,7 +128,6 @@ class LSTMAutoencoderModel(nn.Module):
         )
         self.encoder_fc = nn.Linear(hidden_size, encoding_dim)
 
-        # Decoder
         self.decoder_fc = nn.Linear(encoding_dim, hidden_size)
         self.decoder_lstm = nn.LSTM(
             input_size=encoding_dim,
@@ -160,24 +139,19 @@ class LSTMAutoencoderModel(nn.Module):
         self.output_fc = nn.Linear(hidden_size, input_dim)
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
-        """x: (batch, seq_len, input_dim) → (batch, encoding_dim)"""
         _, (h_n, _) = self.encoder_lstm(x)
         return self.encoder_fc(h_n[-1])
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """x: (batch, seq_len, input_dim) → reconstruction (same shape)"""
         batch_size, seq_len, _ = x.shape
 
-        # Encode to bottleneck
         _, (h_n, _) = self.encoder_lstm(x)
-        encoded = self.encoder_fc(h_n[-1])  # (batch, encoding_dim)
+        encoded = self.encoder_fc(h_n[-1])
 
-        # Repeat bottleneck as decoder input for every timestep
         decoder_input = encoded.unsqueeze(1).expand(
             batch_size, seq_len, self.encoding_dim
-        )  # (batch, seq_len, encoding_dim)
+        )
 
-        # Initialise decoder hidden state from bottleneck
         h_0 = (
             self.decoder_fc(encoded)
             .unsqueeze(0)
@@ -186,15 +160,8 @@ class LSTMAutoencoderModel(nn.Module):
         )
         c_0 = torch.zeros_like(h_0)
 
-        decoder_out, _ = self.decoder_lstm(
-            decoder_input, (h_0, c_0)
-        )  # (batch, seq_len, hidden_size)
-        return self.output_fc(decoder_out)  # (batch, seq_len, input_dim)
-
-
-# ---------------------------------------------------------------------------
-# PyTorch Lightning wrapper
-# ---------------------------------------------------------------------------
+        decoder_out, _ = self.decoder_lstm(decoder_input, (h_0, c_0))
+        return self.output_fc(decoder_out)
 
 
 class LSTMAutoencoderLightningModule(L.LightningModule):
@@ -277,28 +244,12 @@ class LSTMAutoencoderLightningModule(L.LightningModule):
         }
 
 
-# ---------------------------------------------------------------------------
-# Sequence helpers
-# ---------------------------------------------------------------------------
-
-
 def _make_train_sequences(
     df: pd.DataFrame,
     scaled: np.ndarray,
     window_size: int,
     stride: int,
 ) -> np.ndarray:
-    """
-    Build sliding-window sequences for training.
-
-    Groups benign flows by src_ip (if available) and sorts each group by
-    timestamp (if available) before cutting windows. Groups that are shorter
-    than window_size are silently skipped.
-
-    Returns
-    -------
-    np.ndarray of shape (N_sequences, window_size, n_features)
-    """
     n_features = scaled.shape[1]
     has_meta = all(c in df.columns for c in SEQUENCE_META_COLUMNS)
 
@@ -328,18 +279,6 @@ def _make_per_flow_sequences(
     scaled: np.ndarray,
     window_size: int,
 ) -> np.ndarray:
-    """
-    Build one padded sequence per flow (sequence ends at that flow).
-
-    Flows are grouped by src_ip and ordered by timestamp so that each
-    sequence captures the recent temporal context of that specific source.
-    Sequences shorter than window_size are zero-padded on the left.
-
-    Returns
-    -------
-    np.ndarray of shape (N_flows, window_size, n_features), one row per flow
-    in the *original* order of `df` (row i → sequences[i]).
-    """
     n_flows = len(scaled)
     n_features = scaled.shape[1]
     sequences = np.zeros((n_flows, window_size, n_features), dtype=np.float32)
@@ -366,38 +305,27 @@ def _make_per_flow_sequences(
     return sequences
 
 
-# ---------------------------------------------------------------------------
-# Main DeepAutoencoder orchestrator
-# ---------------------------------------------------------------------------
-
-
 class DeepAutoencoder:
     def __init__(self, config: Optional[DeepAutoencoderConfig] = None) -> None:
         self.benign_data: Optional[pd.DataFrame] = None
         self.attack_data: Optional[pd.DataFrame] = None
 
-        # Feature columns (no metadata)
         self._feature_cols: Optional[List[str]] = None
 
-        # DataFrames carrying both features + metadata (src_ip, timestamp)
         self.benign_train: Optional[pd.DataFrame] = None
         self.benign_val: Optional[pd.DataFrame] = None
-        self.test_df: Optional[pd.DataFrame] = None  # features + meta
+        self.test_df: Optional[pd.DataFrame] = None
 
-        # Binary / original labels for the test set
         self.test_labels: Optional[pd.Series] = None
         self.test_labels_orig: Optional[pd.Series] = None
 
-        # Scaled feature arrays (2-D, rows aligned with the DataFrames above)
         self.benign_train_scaled: Optional[np.ndarray] = None
         self.benign_val_scaled: Optional[np.ndarray] = None
         self.test_features_scaled: Optional[np.ndarray] = None
 
-        # Sliding-window 3-D sequence tensors for training/validation
         self.train_sequences: Optional[np.ndarray] = None
         self.val_sequences: Optional[np.ndarray] = None
 
-        # Per-flow anomaly scores on the test set
         self.ae_mse_scores: Optional[np.ndarray] = None
         self.ae_threshold: Optional[Dict[str, float]] = None
 
@@ -413,10 +341,6 @@ class DeepAutoencoder:
 
         self.feature_names: List[str] = UNIFIED_FEATURE_NAMES
 
-    # ------------------------------------------------------------------
-    # Context manager
-    # ------------------------------------------------------------------
-
     def __enter__(self):
         return self
 
@@ -431,10 +355,6 @@ class DeepAutoencoder:
             torch.cuda.empty_cache()
         plt.close("all")
         return False
-
-    # ------------------------------------------------------------------
-    # Pipeline stages
-    # ------------------------------------------------------------------
 
     def check_environment(self) -> None:
         self.log.info(f"PyTorch: {torch.__version__}")
@@ -457,7 +377,6 @@ class DeepAutoencoder:
         self.log.info(f"Benign samples : {len(self.benign_data):,}")
         self.log.info(f"Attack samples : {len(self.attack_data):,}")
 
-        # Report metadata availability
         has_ts = "timestamp" in self.benign_data.columns
         has_ip = "src_ip" in self.benign_data.columns
         self.log.info(f"Sequence metadata — timestamp: {has_ts}, src_ip: {has_ip}")
@@ -465,7 +384,6 @@ class DeepAutoencoder:
     def prepare_data(self) -> None:
         self.log.info("Preparing data...")
 
-        # ---- determine available feature columns ----
         available_features = [
             f for f in self.feature_names if f in self.benign_data.columns
         ]
@@ -474,15 +392,12 @@ class DeepAutoencoder:
             f"flow features for LSTM AE"
         )
 
-        # ---- collect metadata columns present in the data ----
         meta_cols = [c for c in SEQUENCE_META_COLUMNS if c in self.benign_data.columns]
 
         all_cols = available_features + meta_cols
 
-        # ---- benign: keep features + metadata for sequencing ----
         benign_all = self.benign_data[all_cols].copy()
 
-        # ---- test-set attack features (+ metadata if available) ----
         atk_meta_cols = [
             c for c in SEQUENCE_META_COLUMNS if c in self.attack_data.columns
         ]
@@ -491,7 +406,6 @@ class DeepAutoencoder:
             [c for c in atk_cols if c in self.attack_data.columns]
         ].copy()
 
-        # ---- train / val / test split on benign rows ----
         benign_trainval, benign_test = train_test_split(
             benign_all,
             test_size=self.config.test_split,
@@ -504,7 +418,6 @@ class DeepAutoencoder:
             random_state=self.config.split_random_state,
         )
 
-        # ---- test set: benign held-out + all attacks ----
         test_labels_orig = pd.concat(
             [
                 self.benign_data.loc[benign_test.index, "Label"],
@@ -515,13 +428,11 @@ class DeepAutoencoder:
         self.test_labels = (~test_labels_orig.isin(["Normal"])).astype(int)
         self.test_labels_orig = test_labels_orig
 
-        # Combine with metadata for per-flow sequence scoring
         self.test_df = pd.concat(
             [benign_test.reset_index(drop=True), attack_all.reset_index(drop=True)],
             ignore_index=True,
         )
 
-        # Store feature column list (no metadata)
         self._feature_cols = available_features
 
         self.log.info(
@@ -550,7 +461,6 @@ class DeepAutoencoder:
         val_feat = _clean(_feat(self.benign_val))
         test_feat = _clean(_feat(self.test_df))
 
-        # Winsorize using training-set quantiles
         self.clip_params = {}
         for col in train_feat.columns:
             lower = train_feat[col].quantile(self.config.winsorize_lower)
@@ -575,13 +485,6 @@ class DeepAutoencoder:
         self.log.info("Preprocessing completed")
 
     def build_sequences(self) -> None:
-        """
-        Convert scaled flows into sliding-window sequences (for training) and
-        per-flow padded sequences (for inference scoring).
-
-        Training/validation sequences are grouped by src_ip and sorted by
-        timestamp so the LSTM learns genuine temporal patterns per host.
-        """
         W = self.config.window_size
         S = self.config.stride
         self.log.info(f"Building sequences — window_size={W}, stride={S} (training)")
@@ -719,14 +622,6 @@ class DeepAutoencoder:
         self.log.info(f"Best validation loss: {callbacks[2].best_model_score:.6f}")
 
     def predict_autoencoder(self) -> None:
-        """
-        Compute per-flow anomaly scores on the test set.
-
-        For each flow a padded sequence of length window_size is built
-        (src_ip-grouped, timestamp-sorted, zero-padded at the start for
-        flows with insufficient context). The reconstruction MSE is averaged
-        over all timesteps and all features.
-        """
         self.log.info(
             "Calculating LSTM AE anomaly scores on test set "
             f"({len(self.test_df):,} flows)..."
@@ -746,7 +641,7 @@ class DeepAutoencoder:
             self.test_df,
             self.test_features_scaled,
             self.config.window_size,
-        )  # (N_flows, W, F)
+        )
 
         self.ae_mse_scores = self._ae_predict_mse(per_flow_seqs)
 
@@ -852,10 +747,6 @@ class DeepAutoencoder:
         )
 
     def _ae_predict_mse(self, sequences: np.ndarray) -> np.ndarray:
-        """
-        sequences: (N, W, F)  →  per-flow MSE scores  (N,)
-        MSE is averaged over all W timesteps and all F features.
-        """
         self.lightning_module.eval()
         self.lightning_module.to(self.device)
 
@@ -867,7 +758,6 @@ class DeepAutoencoder:
                 end = min(start + self.config.inference_batch_size, n)
                 batch = torch.FloatTensor(sequences[start:end]).to(self.device)
                 recon = self.lightning_module(batch).cpu().numpy()
-                # Mean over (W, F) → scalar per sample
                 mse_scores[start:end] = np.mean(
                     np.square(sequences[start:end] - recon), axis=(1, 2)
                 )
@@ -884,7 +774,6 @@ class DeepAutoencoder:
         attack_mask = self.test_labels.values == 1
 
         output = pd.DataFrame(
-            # self.test_features_scaled[attack_mask],
             self.test_df[self._feature_cols].values[attack_mask],
             columns=self._feature_cols,
         )
@@ -1061,7 +950,6 @@ class DeepAutoencoder:
             cdf = np.arange(1, len(sorted_s) + 1) / len(sorted_s)
             ax.plot(sorted_s, cdf, label=label, color=color, lw=2)
 
-        # Draw all val set threshold candidates as dashed vertical lines
         thresholds: Dict[str, float] = self.ae_threshold or {}
         if thresholds:
             cmap = plt.cm.get_cmap("tab20", len(thresholds))

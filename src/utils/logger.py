@@ -7,14 +7,7 @@ from termcolor import colored
 
 
 class Logger:
-    """
-    Logger class with optional custom color support.
-    """
-
     def __init__(self, name):
-        """
-        Initialize a logger instance.
-        """
         self.logger = logging.getLogger(name)
 
     @staticmethod
@@ -66,39 +59,21 @@ class Logger:
             logging.root.addHandler(file_handler)
 
     def format_message(self, message, color):
-        """
-        Customize log messages based on the provided colors.
-        """
         if color:
             return colored(message, color=color)
         return message
 
     def debug(self, message, color=None):
-        """
-        Log a debug message, optionally with a custom color.
-        """
         self.logger.debug(self.format_message(message, color), stacklevel=2)
 
     def info(self, message, color=None):
-        """
-        Log an info message, optionally with a custom color.
-        """
         self.logger.info(self.format_message(message, color), stacklevel=2)
 
     def warning(self, message, color=None):
-        """
-        Log a warning message, optionally with a custom color.
-        """
         self.logger.warning(self.format_message(message, color), stacklevel=2)
 
     def error(self, message, color=None):
-        """
-        Log an error message, optionally with a custom color.
-        """
         self.logger.error(self.format_message(message, color), stacklevel=2)
 
     def critical(self, message, color=None):
-        """
-        Log a critical message, optionally with a custom color.
-        """
         self.logger.critical(self.format_message(message, color), stacklevel=2)

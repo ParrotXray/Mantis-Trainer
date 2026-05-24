@@ -20,7 +20,7 @@ if __name__ == "__main__":
     available = list_available_datasets()
 
     parser = argparse.ArgumentParser(
-        description="NetGuardia ML Training Pipeline",
+        description="Mantis ML Training Pipeline",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"""
 Examples:

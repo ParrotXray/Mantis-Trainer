@@ -22,7 +22,7 @@ class Exporter:
 
         self.ae_scaler: Optional[Any] = None
         self.ae_clip_params: Optional[Dict[str, Dict[str, float]]] = None
-        self.ae_thresholds: Optional[Dict[str, float]] = None  # dict: name → value
+        self.ae_thresholds: Optional[Dict[str, float]] = None
         self.feature_names: Optional[List[str]] = None
         self.encoding_dim: Optional[int] = None
         self.window_size: Optional[int] = None
@@ -55,7 +55,6 @@ class Exporter:
         os.makedirs("./exports", exist_ok=True)
         model_path = Path("artifacts")
 
-        # ---- Load LSTM Deep Autoencoder ----
         try:
             ae_path = model_path / "deep_autoencoder.pt"
             checkpoint = torch.load(
@@ -81,7 +80,6 @@ class Exporter:
             self.log.error(f"Failed to load LSTM Deep Autoencoder: {e}")
             raise
 
-        # ---- Load AE config ----
         try:
             ae_config_path = model_path / "deep_ae_config.pkl"
             ae_config = joblib.load(ae_config_path)
@@ -91,7 +89,6 @@ class Exporter:
             self.feature_names = ae_config.get("feature_names", UNIFIED_FEATURE_NAMES)
             self.window_size = ae_config.get("window_size", self.window_size or 10)
             self.inference_batch_size = ae_config.get("inference_batch_size", 1024)
-            # ae_thresholds is a dict: name → val threshold value
             self.ae_thresholds = ae_config.get("ae_thresholds", {})
 
             self.log.info(
@@ -248,12 +245,6 @@ class Exporter:
         self.log.info("\n".join(lines))
 
     def verify_onnx_export(self, atol: float = 1e-4) -> None:
-        """
-        Verify that the exported ONNX model matches PyTorch output.
-        Tests two things:
-        1. Numerical agreement between PyTorch and ONNX for the same input.
-        2. ONNX output actually varies across different inputs (catches constant-folded decoder h_0).
-        """
         self.log.info("Verifying ONNX export correctness...")
 
         num_features = self.deep_ae_model.input_dim
@@ -284,7 +275,10 @@ class Exporter:
                     f"[input {i}] PyTorch vs ONNX max diff {max_diff:.6f} exceeds atol {atol}"
                 )
 
-        variation = max(np.abs(ort_outputs[0] - ort_outputs[j]).max() for j in range(1, len(ort_outputs)))
+        variation = max(
+            np.abs(ort_outputs[0] - ort_outputs[j]).max()
+            for j in range(1, len(ort_outputs))
+        )
         if variation < 1e-6:
             raise AssertionError(
                 "ONNX outputs are identical across different inputs — "

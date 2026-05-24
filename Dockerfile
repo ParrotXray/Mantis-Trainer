@@ -1,7 +1,7 @@
 FROM nvidia/cuda:12.8.0-cudnn-runtime-ubuntu24.04
 
 LABEL authors="ParrotXray"
-LABEL description="NetGuardia for training models"
+LABEL description="Mantis for training models"
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TZ=Asia/Taipei

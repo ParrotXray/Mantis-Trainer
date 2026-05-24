@@ -9,14 +9,9 @@ from utils import Logger
 logger = Logger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Unified feature schema
-# ---------------------------------------------------------------------------
-
 SEQUENCE_META_COLUMNS: Final[List[str]] = ["timestamp", "src_ip"]
 
 UNIFIED_FEATURE_NAMES: Final[List[str]] = [
-    # ── Original 27 features ──────────────────────────────────────────────
     "flow_duration",
     "fwd_packets",
     "bwd_packets",
@@ -44,7 +39,6 @@ UNIFIED_FEATURE_NAMES: Final[List[str]] = [
     "bwd_pkt_len_std",
     "fwd_seg_size_min",
     "fwd_act_data_pkts",
-    # ── Added features (27 → 38) ──────────────────────────────────────────
     # Flow IAT spread — slow/low-and-slow attack discrimination
     "flow_iat_std",
     "flow_iat_max",
@@ -61,11 +55,6 @@ UNIFIED_FEATURE_NAMES: Final[List[str]] = [
     # Down/Up ratio — scan/recon pattern discrimination
     "down_up_ratio",
 ]
-
-
-# ---------------------------------------------------------------------------
-# Dataset configuration
-# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -105,12 +94,7 @@ class DatasetConfig:
         return labels
 
 
-# ---------------------------------------------------------------------------
-# Shared extended column mapping (covers both 2017 and 2018 naming)
-# ---------------------------------------------------------------------------
-
 _EXTENDED_COLUMN_MAPPING: Final[Dict[str, str]] = {
-    # ── Original features (2017 naming) ───────────────────────────────────
     "Flow Duration": "flow_duration",
     "Total Fwd Packets": "fwd_packets",
     "Total Backward Packets": "bwd_packets",
@@ -138,7 +122,6 @@ _EXTENDED_COLUMN_MAPPING: Final[Dict[str, str]] = {
     "Bwd Packet Length Std": "bwd_pkt_len_std",
     "min_seg_size_forward": "fwd_seg_size_min",
     "act_data_pkt_fwd": "fwd_act_data_pkts",
-    # ── New features ──────────────────────────────────────────────────────
     "Flow IAT Std": "flow_iat_std",
     "Flow IAT Max": "flow_iat_max",
     "Flow IAT Min": "flow_iat_min",
@@ -151,7 +134,6 @@ _EXTENDED_COLUMN_MAPPING: Final[Dict[str, str]] = {
     "Idle Max": "idle_max",
     "Idle Min": "idle_min",
     "Down/Up Ratio": "down_up_ratio",
-    # ── 2018 fallback naming ───────────────────────────────────────────────
     "Dst Port": "dst_port",
     "Tot Fwd Pkts": "fwd_packets",
     "Tot Bwd Pkts": "bwd_packets",
@@ -173,16 +155,11 @@ _EXTENDED_COLUMN_MAPPING: Final[Dict[str, str]] = {
     "Bwd Pkt Len Std": "bwd_pkt_len_std",
     "Fwd Seg Size Min": "fwd_seg_size_min",
     "Fwd Act Data Pkts": "fwd_act_data_pkts",
-    # ── Sequence metadata ─────────────────────────────────────────────────
     "Timestamp": "timestamp",
     "Src IP": "src_ip",
     "Source IP": "src_ip",
 }
 
-
-# ---------------------------------------------------------------------------
-# CIC-UNSW-NB15
-# ---------------------------------------------------------------------------
 
 CIC_UNSW_NB15_CONFIG: Final[DatasetConfig] = DatasetConfig(
     name="unsw",
@@ -212,10 +189,6 @@ CIC_UNSW_NB15_CONFIG: Final[DatasetConfig] = DatasetConfig(
     column_mapping=_EXTENDED_COLUMN_MAPPING,
 )
 
-# ---------------------------------------------------------------------------
-# LAB-301
-# ---------------------------------------------------------------------------
-
 LAB_301_CONFIG: Final[DatasetConfig] = DatasetConfig(
     name="lab301",
     kaggle_dataset_id="ruiluncai/lab301-timestamp-benign-dataset/versions/1",
@@ -244,10 +217,6 @@ LAB_301_CONFIG: Final[DatasetConfig] = DatasetConfig(
     },
     column_mapping=_EXTENDED_COLUMN_MAPPING,
 )
-
-# ---------------------------------------------------------------------------
-# CIC-IDS-test
-# ---------------------------------------------------------------------------
 
 CIC_TEST_CONFIG: Final[DatasetConfig] = DatasetConfig(
     name="test",
@@ -295,10 +264,6 @@ CIC_TEST_CONFIG: Final[DatasetConfig] = DatasetConfig(
     },
     column_mapping=_EXTENDED_COLUMN_MAPPING,
 )
-
-# ---------------------------------------------------------------------------
-# Registry
-# ---------------------------------------------------------------------------
 
 _DATASET_REGISTRY: Final[Dict[str, DatasetConfig]] = {
     "unsw": CIC_UNSW_NB15_CONFIG,
