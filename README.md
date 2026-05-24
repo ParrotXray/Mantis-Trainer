@@ -6,9 +6,9 @@ A machine learning training pipeline for the [Mantis](https://github.com/ParrotX
 
 Mantis-Trainer implements a two-stage pipeline:
 
-1. **Data Preprocessing** — Loads multiple datasets, maps to a unified 39-feature schema, and normalizes labels
-2. **LSTM Autoencoder** — Trains an unsupervised autoencoder on BENIGN-only traffic for anomaly detection
-3. **ONNX Export** — Exports the trained model and inference configuration for deployment with Mantis
+1. **Data Preprocessing**: Loads multiple datasets, maps to a unified 39-feature schema, and normalizes labels
+2. **LSTM Autoencoder**: Trains an unsupervised autoencoder on BENIGN-only traffic for anomaly detection
+3. **ONNX Export**: Exports the trained model and inference configuration for deployment with Mantis
 
 The autoencoder learns the normal traffic distribution from real laboratory traffic. During inference, flows with high reconstruction error are flagged as anomalies.
 
