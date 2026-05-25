@@ -26,6 +26,10 @@ Anomaly Score = MSE(input, reconstruction)
 
 Training uses a latent norm penalty (`||z||²`) to compress BENIGN latent vectors toward the origin, improving separation from unseen attack flows.
 
+## Inference work flow
+
+<img width="1473" height="513" alt="image" src="https://github.com/user-attachments/assets/02f244ff-ea1b-4a84-a46b-693261418578" />
+
 ## Supported Datasets
 
 Datasets are **auto-downloaded** from Kaggle via [kagglehub](https://github.com/Kaggle/kagglehub).
