@@ -654,7 +654,7 @@ class DeepAutoencoder:
             else 0
         )
 
-        candidate_names = [str(p) for p in range(90, 100)] + [
+        candidate_names = [f"p{p}" for p in range(90, 100)] + [
             "mean+2std",
             "mean+1std",
             "Q3+1.5IQR",
