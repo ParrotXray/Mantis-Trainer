@@ -16,9 +16,9 @@ The autoencoder learns the normal traffic distribution from real laboratory traf
 
 ```
 Input (39 features, window=10)
-    → LSTM Encoder (2 layers, hidden=128)
+    → LSTM Encoder (4 layers, hidden=128)
     → Bottleneck (encoding_dim=32)
-    → LSTM Decoder (2 layers, hidden=128)
+    → LSTM Decoder (4 layers, hidden=128)
     → Reconstruction (39 features)
 
 Anomaly Score = MSE(input, reconstruction)
@@ -149,7 +149,7 @@ docker pull ghcr.io/parrotxray/mantis-trainer:master
 ### Run with Docker
 
 ```bash
-docker run --gpus all \
+docker run --ipc=host --gpus all \
   -v ./src/outputs:/app/src/outputs \
   -v ./src/artifacts:/app/src/artifacts \
   -v ./src/plots:/app/src/plots \

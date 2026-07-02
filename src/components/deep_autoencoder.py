@@ -1,3 +1,4 @@
+import datetime
 import os
 import time
 from pathlib import Path
@@ -338,6 +339,8 @@ class DeepAutoencoder:
         self.config: DeepAutoencoderConfig = config or DeepAutoencoderConfig()
         self.log: Logger = Logger(__name__)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        self.datestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         self.feature_names: List[str] = UNIFIED_FEATURE_NAMES
 
@@ -881,7 +884,7 @@ class DeepAutoencoder:
             ax.grid(alpha=0.3, axis="x")
 
         plt.tight_layout()
-        plot_path = Path("plots") / "deep_ae_analysis.png"
+        plot_path = Path("plots") / f"deep_ae_analysis-{self.datestamp}.png"
         plt.savefig(plot_path, dpi=150, bbox_inches="tight")
         self.log.info(f"Saved: {plot_path}")
         plt.close()
@@ -932,7 +935,7 @@ class DeepAutoencoder:
         ax.grid(alpha=0.3)
 
         plt.tight_layout()
-        plot_path = Path("plots") / "deep_ae_roc_pr.png"
+        plot_path = Path("plots") / f"deep_ae_roc_pr-{self.datestamp}.png"
         plt.savefig(plot_path, dpi=150, bbox_inches="tight")
         self.log.info(f"Saved: {plot_path} (AUC={roc_auc:.4f}, AP={ap:.4f})")
         plt.close()
@@ -969,7 +972,7 @@ class DeepAutoencoder:
         ax.legend(fontsize=7, loc="lower right", ncol=2)
         ax.grid(alpha=0.3)
         plt.tight_layout()
-        plot_path = Path("plots") / "deep_ae_cdf.png"
+        plot_path = Path("plots") / f"deep_ae_cdf-{self.datestamp}.png"
         plt.savefig(plot_path, dpi=150, bbox_inches="tight")
         self.log.info(f"Saved: {plot_path}")
         plt.close()
@@ -1022,7 +1025,7 @@ class DeepAutoencoder:
         ax.set_xlabel("t-SNE 1")
         ax.set_ylabel("t-SNE 2")
         plt.tight_layout()
-        plot_path = Path("plots") / "deep_ae_tsne.png"
+        plot_path = Path("plots") / f"deep_ae_tsne-{self.datestamp}.png"
         plt.savefig(plot_path, dpi=150, bbox_inches="tight")
         self.log.info(f"Saved: {plot_path}")
         plt.close()

@@ -9,7 +9,7 @@ class DeepAutoencoderConfig:
     winsorize_upper: float = 0.995
     fill_value: float = 0.0
 
-    window_size: int = 10
+    window_size: int = 15
     stride: int = 1
 
     hidden_size: int = 128
