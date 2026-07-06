@@ -57,7 +57,7 @@ class PlainProgressCallback(L.Callback):
 
         lr = trainer.optimizers[0].param_groups[0]["lr"]
         self.logger.info(
-            f"[Epoch {trainer.current_epoch + 1}/{trainer.max_epochs}] "
+            f"[Epoch {trainer.current_epoch}/{trainer.max_epochs}] "
             f"Start — {trainer.num_training_batches} batches  lr={lr:.2e}"
         )
 
@@ -94,7 +94,7 @@ class PlainProgressCallback(L.Callback):
         lr = trainer.optimizers[0].param_groups[0]["lr"]
 
         self.logger.info(
-            f"[Epoch {trainer.current_epoch + 1}/{trainer.max_epochs}] "
+            f"[Epoch {trainer.current_epoch}/{trainer.max_epochs}] "
             f"Done {elapsed:.1f}s | "
             f"train_loss={float(m.get('train_loss', float('nan'))):.6f}  "
             f"val_loss={float(m.get('val_loss', float('nan'))):.6f}  "
