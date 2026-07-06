@@ -191,7 +191,7 @@ CIC_UNSW_NB15_CONFIG: Final[DatasetConfig] = DatasetConfig(
 
 LAB_301_CONFIG: Final[DatasetConfig] = DatasetConfig(
     name="lab301",
-    kaggle_dataset_id="ruiluncai/lab301-timestamp-benign-datasetsecound/versions/1",
+    kaggle_dataset_id="ruiluncai/lab301-timestamp-benign-dataset-v2/versions/1",
     label_column="Label",
     benign_labels=["Normal"],
     label_mapping={
