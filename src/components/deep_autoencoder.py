@@ -548,7 +548,7 @@ class DeepAutoencoder:
         total_params = sum(p.numel() for p in self.autoencoder_model.parameters())
         self.log.info(f"Total parameters: {total_params:,}")
 
-    def train_autoencoder(self) -> None:
+    def train_autoencoder(self, resume_ckpt: Optional[Path] = None) -> None:
         self.log.info("Training LSTM Deep Autoencoder with PyTorch Lightning...")
 
         train_dataset = TensorDataset(torch.FloatTensor(self.train_sequences))
@@ -611,7 +611,20 @@ class DeepAutoencoder:
             logger=True,
         )
 
-        trainer.fit(self.lightning_module, train_loader, val_loader)
+        resume_path = (
+            resume_ckpt if resume_ckpt and os.path.exists(resume_ckpt) else None
+        )
+        if resume_path:
+            self.log.info(f"Resuming from checkpoint: {resume_path}")
+        else:
+            self.log.info("No checkpoint provided, starting training from scratch...")
+
+        trainer.fit(
+            self.lightning_module,
+            train_loader,
+            val_loader,
+            ckpt_path=resume_path or None,
+        )
 
         best_model_path = callbacks[2].best_model_path
         if best_model_path:

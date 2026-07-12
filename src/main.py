@@ -72,6 +72,12 @@ Available datasets: {', '.join(available)}
         "-ep", "--export", action="store_true", help="Export models to ONNX"
     )
 
+    parser.add_argument(
+        "--resume",
+        default=None,
+        help="Resume training from checkpoint (e.g. ./artifacts/autoencoder_temp-v14.ckpt)",
+    )
+
     args = parser.parse_args()
 
     if not any(
@@ -130,7 +136,7 @@ Available datasets: {', '.join(available)}
                 da.preprocess_data()
                 da.build_sequences()
                 da.build_autoencoder()
-                da.train_autoencoder()
+                da.train_autoencoder(resume_ckpt=args.resume)
                 da.predict_autoencoder()
                 da.save_results()
                 da.generate_visualizations()

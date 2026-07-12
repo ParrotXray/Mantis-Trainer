@@ -14,7 +14,7 @@ class DeepAutoencoderConfig:
 
     hidden_size: int = 128
     num_layers: int = 4
-    encoding_dim: int = 32
+    encoding_dim: int = 64
     dropout: float = 0.2
 
     learning_rate: float = 0.001

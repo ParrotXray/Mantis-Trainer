@@ -244,7 +244,7 @@ class Exporter:
         )
         self.log.info("\n".join(lines))
 
-    def verify_onnx_export(self, atol: float = 1e-4) -> None:
+    def verify_onnx_export(self) -> None:
         self.log.info("Verifying ONNX export correctness...")
 
         num_features = self.deep_ae_model.input_dim
@@ -270,9 +270,9 @@ class Exporter:
             max_diff = float(np.abs(pt_out - ort_out).max())
             max_diffs.append(max_diff)
 
-            if max_diff > atol:
+            if max_diff > self.config.verify_atol:
                 raise AssertionError(
-                    f"[input {i}] PyTorch vs ONNX max diff {max_diff:.6f} exceeds atol {atol}"
+                    f"[input {i}] PyTorch vs ONNX max diff {max_diff:.6f} exceeds atol {self.config.verify_atol:.6f}"
                 )
 
         variation = max(

@@ -7,3 +7,4 @@ class ExportConfig:
     opset_version: int = 18
     post_scaling_clip_min: float = -5.0
     post_scaling_clip_max: float = 5.0
+    verify_atol: float = 1e-3
