@@ -138,6 +138,7 @@ Available datasets: {', '.join(available)}
                 da.build_autoencoder()
                 da.train_autoencoder(resume_ckpt=args.resume)
                 da.predict_autoencoder()
+                da.bootstrap_metrics()
                 da.save_results()
                 da.generate_visualizations()
 

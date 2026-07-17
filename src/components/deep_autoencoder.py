@@ -28,6 +28,7 @@ from sklearn.metrics import (
     average_precision_score,
     precision_recall_curve,
     roc_curve,
+    roc_auc_score,
 )
 from sklearn.manifold import TSNE
 
@@ -95,7 +96,7 @@ class PlainProgressCallback(L.Callback):
 
         self.logger.info(
             f"[Epoch {trainer.current_epoch}/{trainer.max_epochs}] "
-            f"Done {elapsed:.1f}s | "
+            f"Done {datetime.fromtimestamp(elapsed).strftime('%H:%M:%S')} | "
             f"train_loss={float(m.get('train_loss', float('nan'))):.6f}  "
             f"val_loss={float(m.get('val_loss', float('nan'))):.6f}  "
             f"val_mae={float(m.get('val_mae', float('nan'))):.6f}  "
@@ -385,8 +386,8 @@ class DeepAutoencoder:
         self.log.info(f"Sequence metadata — timestamp: {has_ts}, src_ip: {has_ip}")
 
     def prepare_data(self) -> None:
-        self.log.info("Preparing data...")
-
+        self.log.info("Preparing data (time-based split)...")
+    
         available_features = [
             f for f in self.feature_names if f in self.benign_data.columns
         ]
@@ -394,50 +395,58 @@ class DeepAutoencoder:
             f"Using {len(available_features)}/{len(self.feature_names)} "
             f"flow features for LSTM AE"
         )
-
+    
         meta_cols = [c for c in SEQUENCE_META_COLUMNS if c in self.benign_data.columns]
-
-        all_cols = available_features + meta_cols
-
+        if "timestamp" not in meta_cols:
+            raise RuntimeError(
+                "Time-based splits require a 'timestamp' field, but this is not present in benign_data."
+            )
+    
+        # 把 Label 也一起帶著排序，避免之後還要用舊 index 去反查
+        all_cols = available_features + meta_cols + ["Label"]
         benign_all = self.benign_data[all_cols].copy()
-
-        atk_meta_cols = [
-            c for c in SEQUENCE_META_COLUMNS if c in self.attack_data.columns
-        ]
-        atk_cols = available_features + atk_meta_cols
+    
+        # --- 核心改動：依 timestamp 排序，依比例切，不 shuffle ---
+        benign_sorted = benign_all.sort_values("timestamp").reset_index(drop=True)
+        n = len(benign_sorted)
+    
+        test_frac = self.config.test_split
+        val_frac = self.config.validation_split
+        train_end = int(n * (1 - test_frac - val_frac))
+        val_end = int(n * (1 - test_frac))
+    
+        self.benign_train = benign_sorted.iloc[:train_end].reset_index(drop=True)
+        self.benign_val = benign_sorted.iloc[train_end:val_end].reset_index(drop=True)
+        benign_test = benign_sorted.iloc[val_end:].reset_index(drop=True)
+    
+        self.log.info(
+            f"Time-based split boundaries — "
+            f"train ends: {benign_sorted['timestamp'].iloc[train_end - 1]}, "
+            f"val ends: {benign_sorted['timestamp'].iloc[val_end - 1]}, "
+            f"test ends: {benign_sorted['timestamp'].iloc[-1]}"
+        )
+    
+        atk_meta_cols = [c for c in SEQUENCE_META_COLUMNS if c in self.attack_data.columns]
+        atk_cols = available_features + atk_meta_cols + ["Label"]
         attack_all = self.attack_data[
             [c for c in atk_cols if c in self.attack_data.columns]
         ].copy()
 
-        benign_trainval, benign_test = train_test_split(
-            benign_all,
-            test_size=self.config.test_split,
-            random_state=self.config.split_random_state,
-        )
-        val_ratio = self.config.validation_split / (1.0 - self.config.test_split)
-        self.benign_train, self.benign_val = train_test_split(
-            benign_trainval,
-            test_size=val_ratio,
-            random_state=self.config.split_random_state,
-        )
-
+        # benign_test 全部是正常流量，Label 欄位裡的值就是它本來的標籤（通常是 "Normal"）
         test_labels_orig = pd.concat(
-            [
-                self.benign_data.loc[benign_test.index, "Label"],
-                self.attack_data["Label"],
-            ],
+            [benign_test["Label"], attack_all["Label"]],
             ignore_index=True,
         )
         self.test_labels = (~test_labels_orig.isin(["Normal"])).astype(int)
         self.test_labels_orig = test_labels_orig
-
+    
         self.test_df = pd.concat(
             [benign_test.reset_index(drop=True), attack_all.reset_index(drop=True)],
             ignore_index=True,
         )
-
+    
         self._feature_cols = available_features
-
+    
         self.log.info(
             f"Benign split: train={len(self.benign_train):,} "
             f"/ val={len(self.benign_val):,} "
@@ -760,6 +769,49 @@ class DeepAutoencoder:
                     f"Separation: {separation:.2f}x",
                 ]
             )
+        )
+
+    def bootstrap_metrics(
+        self,
+        n_bootstrap: int = 1000,
+        ci: float = 0.95,
+        random_state: int = 42,
+    ) -> None:
+        """
+        Bootstrap resampling for self.ae_mse_scores / self.test_labels.
+        Does not retrain the model, only performs repeated sampling on the existing test set predictions.
+        """
+        if self.ae_mse_scores is None or self.test_labels is None:
+            raise RuntimeError("Need to run predict_autoencoder() first to have scores for bootstrap")
+
+        y_true = self.test_labels.values
+        y_score = self.ae_mse_scores
+        n = len(y_true)
+
+        rng = np.random.default_rng(random_state)
+        alpha = (1 - ci) / 2
+
+        auc_samples = []
+        for _ in range(n_bootstrap):
+            idx = rng.integers(0, n, size=n)
+            y_t, y_s = y_true[idx], y_score[idx]
+            if len(np.unique(y_t)) < 2:  # 這次抽樣剛好只有單一類別，跳過
+                continue
+            auc_samples.append(roc_auc_score(y_t, y_s))
+
+        if len(auc_samples) == 0:
+            self.log.warning("Bootstrap resampling failed: no valid resamples with both classes present.")
+            return
+
+        auc_samples = np.array(auc_samples)
+        point_auc = roc_auc_score(y_true, y_score)
+        lower = float(np.percentile(auc_samples, 100 * alpha))
+        upper = float(np.percentile(auc_samples, 100 * (1 - alpha)))
+
+        self.log.info(
+            f"\nBootstrap ({len(auc_samples)}/{n_bootstrap} valid resamples, "
+            f"{ci*100:.0f}% CI):\n"
+            f"  AUC: {point_auc:.4f}  [{lower:.4f}, {upper:.4f}]"
         )
 
     def _ae_predict_mse(self, sequences: np.ndarray) -> np.ndarray:
