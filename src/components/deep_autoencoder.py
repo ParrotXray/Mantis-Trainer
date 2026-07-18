@@ -370,12 +370,12 @@ class DeepAutoencoder:
             self.log.info("GPU: No GPU detected, using CPU")
 
     def load_data(self) -> None:
-        self.log.info("Loading data from outputs/preprocessing_benign.csv...")
-        self.benign_data = pd.read_csv("./outputs/preprocessing_benign.csv")
+        self.log.info("Loading data from outputs/preprocessing_benign.parquet...")
+        self.benign_data = pd.read_parquet("./outputs/preprocessing_benign.parquet")
         self.benign_data.columns = self.benign_data.columns.str.strip()
 
-        self.log.info("Loading data from outputs/preprocessing_attack.csv...")
-        self.attack_data = pd.read_csv("./outputs/preprocessing_attack.csv")
+        self.log.info("Loading data from outputs/preprocessing_attack.parquet...")
+        self.attack_data = pd.read_parquet("./outputs/preprocessing_attack.parquet")
         self.attack_data.columns = self.attack_data.columns.str.strip()
 
         self.log.info(f"Benign samples : {len(self.benign_data):,}")
@@ -387,7 +387,7 @@ class DeepAutoencoder:
 
     def prepare_data(self) -> None:
         self.log.info("Preparing data (time-based split)...")
-    
+
         available_features = [
             f for f in self.feature_names if f in self.benign_data.columns
         ]
@@ -395,38 +395,40 @@ class DeepAutoencoder:
             f"Using {len(available_features)}/{len(self.feature_names)} "
             f"flow features for LSTM AE"
         )
-    
+
         meta_cols = [c for c in SEQUENCE_META_COLUMNS if c in self.benign_data.columns]
         if "timestamp" not in meta_cols:
             raise RuntimeError(
                 "Time-based splits require a 'timestamp' field, but this is not present in benign_data."
             )
-    
+
         # 把 Label 也一起帶著排序，避免之後還要用舊 index 去反查
         all_cols = available_features + meta_cols + ["Label"]
         benign_all = self.benign_data[all_cols].copy()
-    
+
         # --- 核心改動：依 timestamp 排序，依比例切，不 shuffle ---
         benign_sorted = benign_all.sort_values("timestamp").reset_index(drop=True)
         n = len(benign_sorted)
-    
+
         test_frac = self.config.test_split
         val_frac = self.config.validation_split
         train_end = int(n * (1 - test_frac - val_frac))
         val_end = int(n * (1 - test_frac))
-    
+
         self.benign_train = benign_sorted.iloc[:train_end].reset_index(drop=True)
         self.benign_val = benign_sorted.iloc[train_end:val_end].reset_index(drop=True)
         benign_test = benign_sorted.iloc[val_end:].reset_index(drop=True)
-    
+
         self.log.info(
             f"Time-based split boundaries — "
             f"train ends: {benign_sorted['timestamp'].iloc[train_end - 1]}, "
             f"val ends: {benign_sorted['timestamp'].iloc[val_end - 1]}, "
             f"test ends: {benign_sorted['timestamp'].iloc[-1]}"
         )
-    
-        atk_meta_cols = [c for c in SEQUENCE_META_COLUMNS if c in self.attack_data.columns]
+
+        atk_meta_cols = [
+            c for c in SEQUENCE_META_COLUMNS if c in self.attack_data.columns
+        ]
         atk_cols = available_features + atk_meta_cols + ["Label"]
         attack_all = self.attack_data[
             [c for c in atk_cols if c in self.attack_data.columns]
@@ -439,14 +441,14 @@ class DeepAutoencoder:
         )
         self.test_labels = (~test_labels_orig.isin(["Normal"])).astype(int)
         self.test_labels_orig = test_labels_orig
-    
+
         self.test_df = pd.concat(
             [benign_test.reset_index(drop=True), attack_all.reset_index(drop=True)],
             ignore_index=True,
         )
-    
+
         self._feature_cols = available_features
-    
+
         self.log.info(
             f"Benign split: train={len(self.benign_train):,} "
             f"/ val={len(self.benign_val):,} "
@@ -782,7 +784,9 @@ class DeepAutoencoder:
         Does not retrain the model, only performs repeated sampling on the existing test set predictions.
         """
         if self.ae_mse_scores is None or self.test_labels is None:
-            raise RuntimeError("Need to run predict_autoencoder() first to have scores for bootstrap")
+            raise RuntimeError(
+                "Need to run predict_autoencoder() first to have scores for bootstrap"
+            )
 
         y_true = self.test_labels.values
         y_score = self.ae_mse_scores
@@ -800,7 +804,9 @@ class DeepAutoencoder:
             auc_samples.append(roc_auc_score(y_t, y_s))
 
         if len(auc_samples) == 0:
-            self.log.warning("Bootstrap resampling failed: no valid resamples with both classes present.")
+            self.log.warning(
+                "Bootstrap resampling failed: no valid resamples with both classes present."
+            )
             return
 
         auc_samples = np.array(auc_samples)

@@ -161,7 +161,7 @@ class DataPreprocess:
         all_frames: List[pd.DataFrame] = []
 
         for ds_config, path in zip(self.dataset_configs, self.paths):
-            self.log.info(f"Loading dataset '{ds_config.name}' from {path}...")
+            self.log.info(f"Loading dataset '{ds_config.kaggle_dataset_id}' from {path}...")
 
             raw_frames = self._load_csv_files(
                 path,
@@ -170,12 +170,12 @@ class DataPreprocess:
                 ds_config.header_name_column,
             )
             if not raw_frames:
-                self.log.warning(f"No CSV files found for '{ds_config.name}' at {path}")
+                self.log.warning(f"No CSV files found for '{ds_config.kaggle_dataset_id}' at {path}")
                 continue
 
             combined_raw = pd.concat(raw_frames, ignore_index=True)
             self.log.info(
-                f"{ds_config.name}: {len(combined_raw):,} rows, "
+                f"{ds_config.kaggle_dataset_id}: {len(combined_raw):,} rows, "
                 f"{combined_raw.shape[1]} columns"
             )
 
@@ -188,7 +188,7 @@ class DataPreprocess:
             mapped = ds_config.compute_derived(mapped)
 
             mapped["_label"] = labels.values
-            mapped["_source"] = ds_config.name
+            mapped["_source"] = ds_config.kaggle_dataset_id
 
             all_frames.append(mapped)
 
@@ -318,14 +318,24 @@ class DataPreprocess:
         if dropped > 0:
             self.log.warning(f"Dropped {dropped:,} rows with invalid labels")
 
-        benign_path = Path("outputs") / "preprocessing_benign.csv"
-        attack_path = Path("outputs") / "preprocessing_attack.csv"
+        benign_csv_path = Path("outputs") / "preprocessing_benign.csv"
+        attack_csv_path = Path("outputs") / "preprocessing_attack.csv"
+        benign_parquet_path = Path("outputs") / "preprocessing_benign.parquet"
+        attack_parquet_path = Path("outputs") / "preprocessing_attack.parquet"
 
-        output_benign.to_csv(benign_path, index=False)
-        output_attack.to_csv(attack_path, index=False)
+        output_benign.to_csv(benign_csv_path, index=False)
+        output_attack.to_csv(attack_csv_path, index=False)
+        output_benign.to_parquet(benign_parquet_path, index=False)
+        output_attack.to_parquet(attack_parquet_path, index=False)
 
-        self.log.info(f"Normal samples:  {len(output_benign):>10,} -> {benign_path}")
-        self.log.info(f"Attack samples:  {len(output_attack):>10,} -> {attack_path}")
+        self.log.info(
+            f"Normal samples:  {len(output_benign):>10,} -> "
+            f"{benign_csv_path}, {benign_parquet_path}"
+        )
+        self.log.info(
+            f"Attack samples:  {len(output_attack):>10,} -> "
+            f"{attack_csv_path}, {attack_parquet_path}"
+        )
 
         stats = {
             "total_samples": len(self.combined_data),

@@ -23,4 +23,5 @@ __all__ = (
     "UNIFIED_FEATURE_NAMES",
     "SEQUENCE_META_COLUMNS",
     "UnsupportedDatasetError",
+    "UnavailableDatasetError",
 )
