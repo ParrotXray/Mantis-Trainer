@@ -318,14 +318,24 @@ class DataPreprocess:
         if dropped > 0:
             self.log.warning(f"Dropped {dropped:,} rows with invalid labels")
 
-        benign_path = Path("outputs") / "preprocessing_benign.csv"
-        attack_path = Path("outputs") / "preprocessing_attack.csv"
+        benign_csv_path = Path("outputs") / "preprocessing_benign.csv"
+        attack_csv_path = Path("outputs") / "preprocessing_attack.csv"
+        benign_parquet_path = Path("outputs") / "preprocessing_benign.parquet"
+        attack_parquet_path = Path("outputs") / "preprocessing_attack.parquet"
 
-        output_benign.to_csv(benign_path, index=False)
-        output_attack.to_csv(attack_path, index=False)
+        output_benign.to_csv(benign_csv_path, index=False)
+        output_attack.to_csv(attack_csv_path, index=False)
+        output_benign.to_parquet(benign_parquet_path, index=False)
+        output_attack.to_parquet(attack_parquet_path, index=False)
 
-        self.log.info(f"Normal samples:  {len(output_benign):>10,} -> {benign_path}")
-        self.log.info(f"Attack samples:  {len(output_attack):>10,} -> {attack_path}")
+        self.log.info(
+            f"Normal samples:  {len(output_benign):>10,} -> "
+            f"{benign_csv_path}, {benign_parquet_path}"
+        )
+        self.log.info(
+            f"Attack samples:  {len(output_attack):>10,} -> "
+            f"{attack_csv_path}, {attack_parquet_path}"
+        )
 
         stats = {
             "total_samples": len(self.combined_data),

@@ -370,12 +370,12 @@ class DeepAutoencoder:
             self.log.info("GPU: No GPU detected, using CPU")
 
     def load_data(self) -> None:
-        self.log.info("Loading data from outputs/preprocessing_benign.csv...")
-        self.benign_data = pd.read_csv("./outputs/preprocessing_benign.csv")
+        self.log.info("Loading data from outputs/preprocessing_benign.parquet...")
+        self.benign_data = pd.read_parquet("./outputs/preprocessing_benign.parquet")
         self.benign_data.columns = self.benign_data.columns.str.strip()
 
-        self.log.info("Loading data from outputs/preprocessing_attack.csv...")
-        self.attack_data = pd.read_csv("./outputs/preprocessing_attack.csv")
+        self.log.info("Loading data from outputs/preprocessing_attack.parquet...")
+        self.attack_data = pd.read_parquet("./outputs/preprocessing_attack.parquet")
         self.attack_data.columns = self.attack_data.columns.str.strip()
 
         self.log.info(f"Benign samples : {len(self.benign_data):,}")
