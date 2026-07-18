@@ -342,7 +342,7 @@ class DataPreprocess:
             "total_features": len(UNIFIED_FEATURE_NAMES),
             "benign_samples": len(output_benign),
             "attack_samples": len(output_attack),
-            "datasets": [cfg.name for cfg in self.dataset_configs],
+            "datasets": [cfg.kaggle_dataset_id for cfg in self.dataset_configs],
             "label_distribution": self.labels.value_counts().to_dict(),
         }
 
