@@ -8,13 +8,13 @@ from .dataset_config import (
 )
 from .deep_autoencoder_config import DeepAutoencoderConfig
 from .error import (
-    UnsupportedDatasetError,
-    UnavailableDatasetError,
-    TrainingError,
-    DatasetLoadingError,
     DataPreprocessingError,
+    DatasetLoadingError,
     ExportError,
     LoadingConfigFailed,
+    TrainingError,
+    UnavailableDatasetError,
+    UnsupportedDatasetError,
 )
 from .export_config import ExportConfig
 from .preprocess_config import PreprocessConfig
