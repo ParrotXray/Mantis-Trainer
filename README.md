@@ -143,7 +143,7 @@ All threshold candidates are exported to `artifacts/deep_ae_config.pkl` under th
 ### Pull Pre-built Image
 
 ```bash
-docker pull ghcr.io/parrotxray/mantis-trainer:master
+docker pull ghcr.io/parrotxray/mantis-trainer:main
 ```
 
 ### Run with Docker
@@ -157,7 +157,7 @@ docker run --ipc=host --gpus all \
   -v ./src/logs:/app/src/logs \
   -e DATASET="lab301,test" \
   -e ALL=true \
-  ghcr.io/parrotxray/mantis-trainer:master
+  ghcr.io/parrotxray/mantis-trainer:main
 ```
 
 ### Environment Variables
