@@ -1,36 +1,33 @@
 import os
 import time
-from pathlib import Path
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import joblib
 import lightning as L
 import matplotlib
-
-import torch
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import torch
 import torch.nn as nn
-import matplotlib.pyplot as plt
-
-from torch.utils.data import DataLoader, TensorDataset
 from lightning.pytorch.callbacks import (
     EarlyStopping,
     LearningRateMonitor,
     ModelCheckpoint,
 )
-
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
+from sklearn.manifold import TSNE
 from sklearn.metrics import (
     auc,
     average_precision_score,
     precision_recall_curve,
-    roc_curve,
     roc_auc_score,
+    roc_curve,
 )
-from sklearn.manifold import TSNE
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from torch.utils.data import DataLoader, TensorDataset
 
 from model import SEQUENCE_META_COLUMNS, UNIFIED_FEATURE_NAMES, DeepAutoencoderConfig
 from utils import Logger
