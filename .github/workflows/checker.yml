@@ -6,13 +6,19 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   format:
     runs-on: ubuntu-latest
+    if: github.actor != 'github-actions[bot]'
 
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        ref: ${{ github.head_ref || github.ref_name }}
 
     - name: Set up Python
       uses: actions/setup-python@v5
@@ -36,15 +42,27 @@ jobs:
       run: |
         python3 -m compileall .
 
-    - name: Check formatting with black
+    - name: Format with black
       run: |
-        black --check src
+        black src
 
-    - name: Check import sorting with isort
+    - name: Sort imports with isort
       run: |
-        isort --check-only src
+        isort src
 
     - name: Lint with flake8
       run: |
         flake8 src --count --select=E9,F63,F7,F82 --show-source --statistics
         flake8 src --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+    - name: Commit and push formatting fixes
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add -A
+        if git diff --cached --quiet; then
+          echo "No formatting changes to commit"
+        else
+          git commit -m "style: auto-format with black and isort [skip ci]"
+          git push origin HEAD:${{ github.head_ref || github.ref_name }}
+        fi
