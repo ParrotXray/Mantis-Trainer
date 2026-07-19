@@ -29,7 +29,12 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 
-from model import SEQUENCE_META_COLUMNS, UNIFIED_FEATURE_NAMES, DeepAutoencoderConfig
+from model import (
+    SEQUENCE_META_COLUMNS,
+    UNIFIED_FEATURE_NAMES,
+    DeepAutoencoderConfig,
+    TrainingError,
+)
 from utils import Logger
 
 matplotlib.use("Agg")
@@ -395,7 +400,7 @@ class DeepAutoencoder:
 
         meta_cols = [c for c in SEQUENCE_META_COLUMNS if c in self.benign_data.columns]
         if "timestamp" not in meta_cols:
-            raise RuntimeError(
+            raise TrainingError(
                 "Time-based splits require a 'timestamp' field, but this is not present in benign_data."
             )
 
@@ -514,7 +519,7 @@ class DeepAutoencoder:
         )
 
         if len(self.train_sequences) == 0:
-            raise RuntimeError(
+            raise TrainingError(
                 "No training sequences were generated. "
                 "Increase data size or decrease window_size."
             )
@@ -778,7 +783,7 @@ class DeepAutoencoder:
         Does not retrain the model, only performs repeated sampling on the existing test set predictions.
         """
         if self.ae_mse_scores is None or self.test_labels is None:
-            raise RuntimeError(
+            raise TrainingError(
                 "Need to run predict_autoencoder() first to have scores for bootstrap"
             )
 

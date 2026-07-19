@@ -11,6 +11,8 @@ from model import (
     UNIFIED_FEATURE_NAMES,
     DatasetConfig,
     PreprocessConfig,
+    DatasetLoadingError,
+    DataPreprocessingError,
 )
 from utils import Logger
 
@@ -23,7 +25,7 @@ class DataPreprocess:
         config: Optional[PreprocessConfig] = None,
     ) -> None:
         if len(dataset_configs) != len(paths):
-            raise ValueError(
+            raise DatasetLoadingError(
                 f"Number of dataset configs ({len(dataset_configs)}) "
                 f"must match number of paths ({len(paths)})"
             )
@@ -197,7 +199,7 @@ class DataPreprocess:
             all_frames.append(mapped)
 
         if not all_frames:
-            raise ValueError("No datasets were successfully loaded!")
+            raise DatasetLoadingError("No datasets were successfully loaded!")
 
         self.combined_data = pd.concat(all_frames, ignore_index=True)
         self.log.info(
@@ -207,7 +209,7 @@ class DataPreprocess:
 
     def statistics_dataset(self) -> None:
         if self.combined_data is None:
-            raise ValueError("No combined data. Call load_datasets() first!")
+            raise DatasetLoadingError("No combined data. Call load_datasets() first!")
 
         self.log.info("Dataset statistics...")
         self.labels = self.combined_data["_label"].copy()
@@ -237,7 +239,9 @@ class DataPreprocess:
 
     def feature_preparation(self) -> None:
         if self.combined_data is None:
-            raise ValueError("No combined data. Call load_datasets() first!")
+            raise DataPreprocessingError(
+                "No combined data. Call load_datasets() first!"
+            )
 
         self.log.info("Feature preparation (unified schema)...")
 
@@ -298,7 +302,9 @@ class DataPreprocess:
 
     def output_result(self) -> None:
         if self.feature_matrix is None or self.labels is None:
-            raise ValueError("No feature matrix. Call feature_preparation() first!")
+            raise DataPreprocessingError(
+                "No feature matrix. Call feature_preparation() first!"
+            )
 
         self.log.info("Saving processed data...")
 
