@@ -42,13 +42,37 @@ jobs:
       run: |
         python3 -m compileall .
 
-    - name: Format with black
+    - name: Check whether PR is from a fork
+      id: fork_check
       run: |
-        black src
+        if [ "${{ github.event_name }}" == "pull_request" ] && \
+           [ "${{ github.event.pull_request.head.repo.full_name }}" != "${{ github.repository }}" ]; then
+          echo "is_fork=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "is_fork=false" >> "$GITHUB_OUTPUT"
+        fi
 
-    - name: Sort imports with isort
+    # Fork PRs run with a read-only GITHUB_TOKEN (GitHub security restriction),
+    # so formatting can only be checked, not auto-fixed and pushed back.
+    - name: Format with black (auto-fix)
+      if: steps.fork_check.outputs.is_fork == 'false'
+      run: black src
+
+    - name: Sort imports with isort (auto-fix)
+      if: steps.fork_check.outputs.is_fork == 'false'
+      run: isort src
+
+    - name: Check formatting with black (fork PR)
+      if: steps.fork_check.outputs.is_fork == 'true'
+      run: black --check --diff src
+
+    - name: Check import sorting with isort (fork PR)
+      if: steps.fork_check.outputs.is_fork == 'true'
       run: |
-        isort src
+        isort --check-only --diff src || {
+          echo "::error::Formatting issues found. Since this PR is from a fork, please run 'black src && isort src' locally and push the fix yourself."
+          exit 1
+        }
 
     - name: Lint with flake8
       run: |
@@ -56,6 +80,7 @@ jobs:
         flake8 src --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
 
     - name: Commit and push formatting fixes
+      if: steps.fork_check.outputs.is_fork == 'false'
       run: |
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
