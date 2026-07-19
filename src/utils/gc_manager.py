@@ -1,12 +1,12 @@
 import gc
 import os
 import time
-import psutil
 import tracemalloc
-
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Optional
+
+import psutil
 
 from .logger import Logger
 

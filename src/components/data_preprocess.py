@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from typing import List, Optional, Final
+from typing import Final, List, Optional
 
 import numpy as np
 import pandas as pd
