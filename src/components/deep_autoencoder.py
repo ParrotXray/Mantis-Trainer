@@ -1,7 +1,7 @@
 import os
 import time
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
 import joblib
@@ -96,7 +96,7 @@ class PlainProgressCallback(L.Callback):
 
         self.logger.info(
             f"[Epoch {trainer.current_epoch}/{trainer.max_epochs}] "
-            f"Done {datetime.fromtimestamp(elapsed).strftime('%H:%M:%S')} | "
+            f"Done {timedelta(seconds=elapsed)} | "
             f"train_loss={float(m.get('train_loss', float('nan'))):.6f}  "
             f"val_loss={float(m.get('val_loss', float('nan'))):.6f}  "
             f"val_mae={float(m.get('val_mae', float('nan'))):.6f}  "
@@ -402,11 +402,9 @@ class DeepAutoencoder:
                 "Time-based splits require a 'timestamp' field, but this is not present in benign_data."
             )
 
-        # 把 Label 也一起帶著排序，避免之後還要用舊 index 去反查
         all_cols = available_features + meta_cols + ["Label"]
         benign_all = self.benign_data[all_cols].copy()
 
-        # --- 核心改動：依 timestamp 排序，依比例切，不 shuffle ---
         benign_sorted = benign_all.sort_values("timestamp").reset_index(drop=True)
         n = len(benign_sorted)
 
@@ -421,9 +419,9 @@ class DeepAutoencoder:
 
         self.log.info(
             f"Time-based split boundaries — "
-            f"train ends: {benign_sorted['timestamp'].iloc[train_end - 1]}, "
-            f"val ends: {benign_sorted['timestamp'].iloc[val_end - 1]}, "
-            f"test ends: {benign_sorted['timestamp'].iloc[-1]}"
+            f"train ends: {datetime.fromtimestamp(benign_sorted['timestamp'].iloc[train_end - 1]).strftime('%Y-%m-%d %H:%M:%S')}, "
+            f"val ends: {datetime.fromtimestamp(benign_sorted['timestamp'].iloc[val_end - 1]).strftime('%Y-%m-%d %H:%M:%S')}, "
+            f"test ends: {datetime.fromtimestamp(benign_sorted['timestamp'].iloc[-1]).strftime('%Y-%m-%d %H:%M:%S')}"
         )
 
         atk_meta_cols = [
@@ -434,7 +432,6 @@ class DeepAutoencoder:
             [c for c in atk_cols if c in self.attack_data.columns]
         ].copy()
 
-        # benign_test 全部是正常流量，Label 欄位裡的值就是它本來的標籤（通常是 "Normal"）
         test_labels_orig = pd.concat(
             [benign_test["Label"], attack_all["Label"]],
             ignore_index=True,
@@ -799,8 +796,10 @@ class DeepAutoencoder:
         for _ in range(n_bootstrap):
             idx = rng.integers(0, n, size=n)
             y_t, y_s = y_true[idx], y_score[idx]
-            if len(np.unique(y_t)) < 2:  # 這次抽樣剛好只有單一類別，跳過
+
+            if len(np.unique(y_t)) < 2:
                 continue
+
             auc_samples.append(roc_auc_score(y_t, y_s))
 
         if len(auc_samples) == 0:

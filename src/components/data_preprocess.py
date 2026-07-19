@@ -161,7 +161,9 @@ class DataPreprocess:
         all_frames: List[pd.DataFrame] = []
 
         for ds_config, path in zip(self.dataset_configs, self.paths):
-            self.log.info(f"Loading dataset '{ds_config.kaggle_dataset_id}' from {path}...")
+            self.log.info(
+                f"Loading dataset '{ds_config.kaggle_dataset_id}' from {path}..."
+            )
 
             raw_frames = self._load_csv_files(
                 path,
@@ -170,7 +172,9 @@ class DataPreprocess:
                 ds_config.header_name_column,
             )
             if not raw_frames:
-                self.log.warning(f"No CSV files found for '{ds_config.kaggle_dataset_id}' at {path}")
+                self.log.warning(
+                    f"No CSV files found for '{ds_config.kaggle_dataset_id}' at {path}"
+                )
                 continue
 
             combined_raw = pd.concat(raw_frames, ignore_index=True)

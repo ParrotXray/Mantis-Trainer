@@ -3,6 +3,7 @@ class UnsupportedDatasetError(ValueError):
 
     pass
 
+
 class UnavailableDatasetError(ValueError):
     """Raised when a requested resource is not available"""
 
