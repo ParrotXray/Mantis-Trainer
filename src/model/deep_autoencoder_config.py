@@ -22,13 +22,13 @@ class DeepAutoencoderConfig:
     batch_size: int = 8192
     inference_batch_size: int = 1024
     epochs: int = 1000
-    validation_split: float = 0.08
+    validation_split: float = 0.10
     early_stopping_patience: int = 5
     reduce_lr_patience: int = 3
     reduce_lr_factor: float = 0.5
     min_lr: float = 1e-7
     split_random_state: int = 42
-    test_split: float = 0.10
+    test_split: float = 0.15
 
     # Adds ||z||^2 to loss, compressing BENIGN latent vectors toward origin to widen the gap with attack flows.
     latent_norm_weight: float = 1e-3
