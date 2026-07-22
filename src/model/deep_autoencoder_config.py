@@ -32,3 +32,10 @@ class DeepAutoencoderConfig:
 
     # Adds ||z||^2 to loss, compressing BENIGN latent vectors toward origin to widen the gap with attack flows.
     latent_norm_weight: float = 1e-3
+
+    # Isolation Forest on the AE latent space (parallel anomaly signal, OR-combined with AE).
+    iso_n_estimators: int = 100
+    iso_random_state: int = 42
+    iso_threshold_percentile: float = 5.0
+    # Which val-calibrated self.ae_threshold candidate to use as the AE side of the OR combination.
+    ae_reference_threshold_name: str = "mean+2std"
