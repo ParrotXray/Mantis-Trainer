@@ -17,6 +17,7 @@ from lightning.pytorch.callbacks import (
     LearningRateMonitor,
     ModelCheckpoint,
 )
+from sklearn.ensemble import IsolationForest
 from sklearn.manifold import TSNE
 from sklearn.metrics import (
     auc,
@@ -332,6 +333,11 @@ class DeepAutoencoder:
 
         self.ae_mse_scores: Optional[np.ndarray] = None
         self.ae_threshold: Optional[Dict[str, float]] = None
+
+        self.iso_forest: Optional[IsolationForest] = None
+        self.iso_scores: Optional[np.ndarray] = None
+        self.iso_threshold: Optional[float] = None
+        self.combined_anomaly_mask: Optional[np.ndarray] = None
 
         self.scaler: Optional[StandardScaler] = None
         self.clip_params: Optional[Dict[str, Dict[str, float]]] = None
@@ -772,6 +778,116 @@ class DeepAutoencoder:
             )
         )
 
+    def build_isolation_forest(self) -> None:
+        """
+        Trains an Isolation Forest on the AE latent space of benign_train only.
+        Must run after train_autoencoder() (encoder weights fixed from here on).
+        """
+        self.log.info("Building Isolation Forest on LSTM AE latent space...")
+
+        train_seqs = _make_per_flow_sequences(
+            self.benign_train, self.benign_train_scaled, self.config.window_size
+        )
+        latent_train = self._encode_latent(train_seqs)
+
+        self.log.info(
+            f"Latent vectors for training: {latent_train.shape[0]:,} samples, "
+            f"dim={latent_train.shape[1]}"
+        )
+
+        self.iso_forest = IsolationForest(
+            n_estimators=self.config.iso_n_estimators,
+            random_state=self.config.iso_random_state,
+            n_jobs=-1,
+        )
+        self.iso_forest.fit(latent_train)
+
+        self.log.info("Isolation Forest training completed")
+
+    def predict_isolation_forest(self) -> None:
+        """
+        Calibrates the IF threshold on benign_val (never on test, matching the AE
+        threshold calibration in predict_autoencoder), scores the test set, and
+        OR-combines with the AE decision using the same val-calibrated AE threshold
+        predict_autoencoder() already produced — no threshold is recomputed from
+        test-set statistics, to avoid leaking test labels into either threshold.
+        """
+        if self.iso_forest is None:
+            raise TrainingError("Need to run build_isolation_forest() first")
+        if self.ae_mse_scores is None or self.ae_threshold is None or self.test_labels is None:
+            raise TrainingError("Need to run predict_autoencoder() first")
+
+        ref_name = self.config.ae_reference_threshold_name
+        if ref_name not in self.ae_threshold:
+            raise TrainingError(
+                f"ae_reference_threshold_name={ref_name!r} not among calibrated "
+                f"AE thresholds: {list(self.ae_threshold.keys())}"
+            )
+        ae_threshold_ref = self.ae_threshold[ref_name]
+
+        val_seqs = _make_per_flow_sequences(
+            self.benign_val, self.benign_val_scaled, self.config.window_size
+        )
+        latent_val = self._encode_latent(val_seqs)
+        iso_scores_val = self.iso_forest.score_samples(latent_val)  # lower = more anomalous
+        iso_threshold = float(
+            np.percentile(iso_scores_val, self.config.iso_threshold_percentile)
+        )
+
+        self.log.info(
+            f"Isolation Forest threshold (val set, "
+            f"p{self.config.iso_threshold_percentile}): {iso_threshold:.6f}"
+        )
+
+        test_seqs = _make_per_flow_sequences(
+            self.test_df, self.test_features_scaled, self.config.window_size
+        )
+        latent_test = self._encode_latent(test_seqs)
+        self.iso_scores = self.iso_forest.score_samples(latent_test)
+
+        is_anomaly_iso = self.iso_scores < iso_threshold
+        is_anomaly_ae = self.ae_mse_scores > ae_threshold_ref
+
+        combined = is_anomaly_ae | is_anomaly_iso
+        y_true = self.test_labels.values.astype(bool)
+
+        ae_missed = y_true & (~is_anomaly_ae)
+        iso_catches_ae_missed = int((ae_missed & is_anomaly_iso).sum())
+
+        iso_missed = y_true & (~is_anomaly_iso)
+        ae_catches_iso_missed = int((iso_missed & is_anomaly_ae).sum())
+
+        def _rates(pred: np.ndarray) -> Tuple[float, float]:
+            tp = (pred & y_true).sum()
+            fp = (pred & ~y_true).sum()
+            tpr = tp / y_true.sum() if y_true.sum() > 0 else float("nan")
+            fpr = fp / (~y_true).sum() if (~y_true).sum() > 0 else float("nan")
+            return tpr, fpr
+
+        tpr_ae, fpr_ae = _rates(is_anomaly_ae)
+        tpr_iso, fpr_iso = _rates(is_anomaly_iso)
+        tpr_combined, fpr_combined = _rates(combined)
+
+        self.log.info(
+            "\n".join(
+                [
+                    f"\nAE ({ref_name}, val-calibrated) vs Isolation Forest vs Combined:",
+                    f"{'':<12} {'TPR':<10} {'FPR':<10}",
+                    f"{'AE only':<12} {tpr_ae:<10.4f} {fpr_ae:<10.4f}",
+                    f"{'IF only':<12} {tpr_iso:<10.4f} {fpr_iso:<10.4f}",
+                    f"{'Combined':<12} {tpr_combined:<10.4f} {fpr_combined:<10.4f}",
+                    "",
+                    f"AE 漏掉、但 IF 抓到的攻擊樣本數: {iso_catches_ae_missed:,} "
+                    f"(AE 漏掉的攻擊總數: {int(ae_missed.sum()):,})",
+                    f"IF 漏掉、但 AE 抓到的攻擊樣本數: {ae_catches_iso_missed:,} "
+                    f"(IF 漏掉的攻擊總數: {int(iso_missed.sum()):,})",
+                ]
+            )
+        )
+
+        self.iso_threshold = iso_threshold
+        self.combined_anomaly_mask = combined
+
     def bootstrap_metrics(
         self,
         n_bootstrap: int = 1000,
@@ -839,6 +955,20 @@ class DeepAutoencoder:
 
         return mse_scores
 
+    def _encode_latent(self, sequences: np.ndarray) -> np.ndarray:
+        self.lightning_module.eval()
+        self.lightning_module.to(self.device)
+
+        n = len(sequences)
+        latents = []
+        with torch.no_grad():
+            for start in range(0, n, self.config.inference_batch_size):
+                end = min(start + self.config.inference_batch_size, n)
+                batch = torch.FloatTensor(sequences[start:end]).to(self.device)
+                z = self.lightning_module.model.encode(batch).cpu().numpy()
+                latents.append(z)
+        return np.concatenate(latents, axis=0)
+
     def save_results(self) -> None:
         self.log.info("Saving results...")
 
@@ -853,6 +983,10 @@ class DeepAutoencoder:
             columns=self._feature_cols,
         )
         output["ae_anomaly_score"] = self.ae_mse_scores[attack_mask]
+        if self.iso_scores is not None:
+            output["iso_anomaly_score"] = self.iso_scores[attack_mask]
+        if self.combined_anomaly_mask is not None:
+            output["combined_is_anomaly"] = self.combined_anomaly_mask[attack_mask]
         output["Label"] = self.test_labels_orig[attack_mask].values
 
         output_path = Path("outputs") / "deep_ae_scores.csv"
@@ -881,6 +1015,11 @@ class DeepAutoencoder:
         )
         self.log.info(f"Saved: {model_ae_path}")
 
+        if self.iso_forest is not None:
+            iso_forest_path = Path("artifacts") / "isolation_forest.joblib"
+            joblib.dump(self.iso_forest, iso_forest_path)
+            self.log.info(f"Saved: {iso_forest_path}")
+
         config_data = {
             "scaler": self.scaler,
             "clip_params": self.clip_params,
@@ -889,6 +1028,8 @@ class DeepAutoencoder:
             "inference_batch_size": self.config.inference_batch_size,
             "feature_names": self._feature_cols,
             "ae_thresholds": self.ae_threshold,
+            "ae_reference_threshold_name": self.config.ae_reference_threshold_name,
+            "iso_threshold": self.iso_threshold,
         }
         config_path = Path("artifacts") / "deep_ae_config.pkl"
         joblib.dump(config_data, config_path)
