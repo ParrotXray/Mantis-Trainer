@@ -427,9 +427,9 @@ class DeepAutoencoder:
 
         self.log.info(
             f"Time-based split boundaries — "
-            f"train ends: {datetime.fromtimestamp(benign_sorted['timestamp'].iloc[train_end - 1]).strftime('%Y-%m-%d %H:%M:%S')}, "
-            f"val ends: {datetime.fromtimestamp(benign_sorted['timestamp'].iloc[val_end - 1]).strftime('%Y-%m-%d %H:%M:%S')}, "
-            f"test ends: {datetime.fromtimestamp(benign_sorted['timestamp'].iloc[-1]).strftime('%Y-%m-%d %H:%M:%S')}"
+            f"train ends: {datetime.fromtimestamp(benign_sorted['timestamp'].iloc[train_end - 1] / 1000).strftime('%Y-%m-%d %H:%M:%S')}, "
+            f"val ends: {datetime.fromtimestamp(benign_sorted['timestamp'].iloc[val_end - 1] / 1000).strftime('%Y-%m-%d %H:%M:%S')}, "
+            f"test ends: {datetime.fromtimestamp(benign_sorted['timestamp'].iloc[-1] / 1000).strftime('%Y-%m-%d %H:%M:%S')}"
         )
 
         atk_meta_cols = [
