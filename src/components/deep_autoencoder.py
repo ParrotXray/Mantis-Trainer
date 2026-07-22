@@ -814,7 +814,11 @@ class DeepAutoencoder:
         """
         if self.iso_forest is None:
             raise TrainingError("Need to run build_isolation_forest() first")
-        if self.ae_mse_scores is None or self.ae_threshold is None or self.test_labels is None:
+        if (
+            self.ae_mse_scores is None
+            or self.ae_threshold is None
+            or self.test_labels is None
+        ):
             raise TrainingError("Need to run predict_autoencoder() first")
 
         ref_name = self.config.ae_reference_threshold_name
@@ -829,7 +833,9 @@ class DeepAutoencoder:
             self.benign_val, self.benign_val_scaled, self.config.window_size
         )
         latent_val = self._encode_latent(val_seqs)
-        iso_scores_val = self.iso_forest.score_samples(latent_val)  # lower = more anomalous
+        iso_scores_val = self.iso_forest.score_samples(
+            latent_val
+        )  # lower = more anomalous
         iso_threshold = float(
             np.percentile(iso_scores_val, self.config.iso_threshold_percentile)
         )
