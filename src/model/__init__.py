@@ -7,7 +7,15 @@ from .dataset_config import (
     list_available_datasets,
 )
 from .deep_autoencoder_config import DeepAutoencoderConfig
-from .error import UnsupportedDatasetError
+from .error import (
+    DataPreprocessingError,
+    DatasetLoadingError,
+    ExportError,
+    LoadingConfigFailed,
+    TrainingError,
+    UnavailableDatasetError,
+    UnsupportedDatasetError,
+)
 from .export_config import ExportConfig
 from .preprocess_config import PreprocessConfig
 
@@ -23,4 +31,10 @@ __all__ = (
     "UNIFIED_FEATURE_NAMES",
     "SEQUENCE_META_COLUMNS",
     "UnsupportedDatasetError",
+    "UnavailableDatasetError",
+    "TrainingError",
+    "DatasetLoadingError",
+    "DataPreprocessingError",
+    "ExportError",
+    "LoadingConfigFailed",
 )

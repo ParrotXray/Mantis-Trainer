@@ -10,7 +10,7 @@ import pandas as pd
 import torch
 import ujson
 
-from model import UNIFIED_FEATURE_NAMES, ExportConfig
+from model import UNIFIED_FEATURE_NAMES, ExportConfig, ExportError, LoadingConfigFailed
 from utils import Logger
 
 from .deep_autoencoder import LSTMAutoencoderModel
@@ -78,7 +78,7 @@ class Exporter:
             )
         except Exception as e:
             self.log.error(f"Failed to load LSTM Deep Autoencoder: {e}")
-            raise
+            raise LoadingConfigFailed(f"Failed to load LSTM Deep Autoencoder: {e}")
 
         try:
             ae_config_path = model_path / "deep_ae_config.pkl"
@@ -97,7 +97,7 @@ class Exporter:
             )
         except Exception as e:
             self.log.error(f"Failed to load AE config: {e}")
-            raise
+            raise LoadingConfigFailed(f"Failed to load AE config: {e}")
 
     def export_deep_ae_onnx(self) -> None:
         self.log.info("Converting LSTM Deep Autoencoder to ONNX...")
@@ -271,7 +271,7 @@ class Exporter:
             max_diffs.append(max_diff)
 
             if max_diff > self.config.verify_atol:
-                raise AssertionError(
+                raise ExportError(
                     f"[input {i}] PyTorch vs ONNX max diff {max_diff:.6f} exceeds atol {self.config.verify_atol:.6f}"
                 )
 
@@ -280,7 +280,7 @@ class Exporter:
             for j in range(1, len(ort_outputs))
         )
         if variation < 1e-6:
-            raise AssertionError(
+            raise ExportError(
                 "ONNX outputs are identical across different inputs — "
                 "decoder h_0 was likely constant-folded. Re-export with do_constant_folding=False."
             )

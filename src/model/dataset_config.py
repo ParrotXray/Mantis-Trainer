@@ -6,6 +6,8 @@ import pandas as pd
 
 from utils import Logger
 
+from .error import UnavailableDatasetError
+
 logger = Logger(__name__)
 
 
@@ -25,6 +27,10 @@ UNIFIED_FEATURE_NAMES: Final[List[str]] = [
     "bwd_pkt_len_mean",
     "fwd_iat_mean",
     "bwd_iat_mean",
+    "fwd_iat_std",
+    "bwd_iat_std",
+    "fwd_iat_min",
+    "bwd_iat_min",
     "flow_iat_mean",
     "pkt_len_mean",
     "dst_port",
@@ -59,7 +65,6 @@ UNIFIED_FEATURE_NAMES: Final[List[str]] = [
 
 @dataclass
 class DatasetConfig:
-    name: str
     label_column: str
     benign_labels: List[str]
     label_mapping: Dict[str, str]
@@ -94,6 +99,66 @@ class DatasetConfig:
         return labels
 
 
+_LABEL_MAPPING: Final[Dict[str, str]] = {
+    "Benign": "Normal",
+    "BENIGN": "Normal",
+    "Normal": "Normal",
+    "": "Normal",
+    "nan": "Normal",
+    "DoS": "DoS",
+    "Dos": "DoS",
+    "DOS": "DoS",
+    "Exploits": "Exploitation",
+    "Shellcode": "Exploitation",
+    "Worms": "Exploitation",
+    "Backdoor": "Exploitation",
+    "Backdoors": "Exploitation",
+    "Reconnaissance": "Reconnaissance",
+    "Generic": "Reconnaissance",
+    "Fuzzers": "Reconnaissance",
+    "Analysis": "Reconnaissance",
+    "DoS GoldenEye": "DoS",
+    "DoS Hulk": "DoS",
+    "DoS Slowhttptest": "DoS",
+    "DoS slowloris": "DoS",
+    "DDoS": "DDoS",
+    "FTP-Patator": "Brute Force",
+    "SSH-Patator": "Brute Force",
+    "Web Attack \u2013 Brute Force": "Brute Force",
+    "Web Attack - Brute Force": "Brute Force",
+    "Web Attack \u2013 Sql Injection": "Reconnaissance",
+    "Web Attack \u2013 XSS": "Reconnaissance",
+    "Web Attack - Sql Injection": "Reconnaissance",
+    "Web Attack - XSS": "Reconnaissance",
+    "Infiltration": "Exploitation",
+    "Heartbleed": "Exploitation",
+    "PortScan": "Reconnaissance",
+    "Bot": "Exploitation",
+    "DoS GoldenEye": "DoS",
+    "DoS Hulk": "DoS",
+    "DoS Slowhttptest": "DoS",
+    "DoS slowloris": "DoS",
+    "DoS-slowhttp": "DoS",
+    "DoS-hulk": "DoS",
+    "DDoS": "DDoS",
+    "DDoS-bot": "DDoS",
+    "DDoS-stomp": "DDoS",
+    "DDoS-dyn": "DDoS",
+    "DDoS-tcp": "DDoS",
+    "Web-sql-injection": "Reconnaissance",
+    "Web-xss": "Reconnaissance",
+    "Web-command-injection": "Reconnaissance",
+    "Infiltration-mitm": "Exploitation",
+    "slowheaders": "DoS",
+    "ddossim": "DDoS",
+    "slowread": "DoS",
+    "slowloris": "DoS",
+    "hulk": "DoS",
+    "slowbody2": "DoS",
+    "rudy": "DoS",
+    "goldeneye": "DoS",
+}
+
 _EXTENDED_COLUMN_MAPPING: Final[Dict[str, str]] = {
     "Flow Duration": "flow_duration",
     "Total Fwd Packets": "fwd_packets",
@@ -122,6 +187,10 @@ _EXTENDED_COLUMN_MAPPING: Final[Dict[str, str]] = {
     "Bwd Packet Length Std": "bwd_pkt_len_std",
     "min_seg_size_forward": "fwd_seg_size_min",
     "act_data_pkt_fwd": "fwd_act_data_pkts",
+    "Fwd IAT Std": "fwd_iat_std",
+    "Bwd IAT Std": "bwd_iat_std",
+    "Fwd IAT Min": "fwd_iat_min",
+    "Bwd IAT Min": "bwd_iat_min",
     "Flow IAT Std": "flow_iat_std",
     "Flow IAT Max": "flow_iat_max",
     "Flow IAT Min": "flow_iat_min",
@@ -161,132 +230,47 @@ _EXTENDED_COLUMN_MAPPING: Final[Dict[str, str]] = {
 }
 
 
-CIC_UNSW_NB15_CONFIG: Final[DatasetConfig] = DatasetConfig(
-    name="unsw",
-    kaggle_dataset_id="yasserhessein/cic-unsw-nb15-augmented-dataset/versions/1",
-    csv_glob="CICFlowMeter.csv",
-    label_column="Label",
-    benign_labels=["Normal"],
-    label_mapping={
-        "Benign": "Normal",
-        "BENIGN": "Normal",
-        "Normal": "Normal",
-        "": "Normal",
-        "nan": "Normal",
-        "DoS": "DoS",
-        "Dos": "DoS",
-        "DOS": "DoS",
-        "Exploits": "Exploitation",
-        "Shellcode": "Exploitation",
-        "Worms": "Exploitation",
-        "Backdoor": "Exploitation",
-        "Backdoors": "Exploitation",
-        "Reconnaissance": "Reconnaissance",
-        "Generic": "Reconnaissance",
-        "Fuzzers": "Reconnaissance",
-        "Analysis": "Reconnaissance",
-    },
-    column_mapping=_EXTENDED_COLUMN_MAPPING,
-)
+class DatasetRegistry:
+    _registry: Dict[str, DatasetConfig] = {}
 
-LAB_301_CONFIG: Final[DatasetConfig] = DatasetConfig(
-    name="lab301",
-    kaggle_dataset_id="ruiluncai/lab301-timestamp-benign-dataset-v2/versions/1",
-    label_column="Label",
-    benign_labels=["Normal"],
-    label_mapping={
-        "BENIGN": "Normal",
-        "Benign": "Normal",
-        "DoS GoldenEye": "DoS",
-        "DoS Hulk": "DoS",
-        "DoS Slowhttptest": "DoS",
-        "DoS slowloris": "DoS",
-        "DDoS": "DDoS",
-        "FTP-Patator": "Brute Force",
-        "SSH-Patator": "Brute Force",
-        "Web Attack \u2013 Brute Force": "Brute Force",
-        "Web Attack - Brute Force": "Brute Force",
-        "Web Attack \u2013 Sql Injection": "Reconnaissance",
-        "Web Attack \u2013 XSS": "Reconnaissance",
-        "Web Attack - Sql Injection": "Reconnaissance",
-        "Web Attack - XSS": "Reconnaissance",
-        "Infiltration": "Exploitation",
-        "Heartbleed": "Exploitation",
-        "PortScan": "Reconnaissance",
-        "Bot": "Exploitation",
-    },
-    column_mapping=_EXTENDED_COLUMN_MAPPING,
-)
+    @classmethod
+    def register(cls, name: str, config: DatasetConfig):
+        key = name.strip().lower()
+        cls._registry[key] = config
 
-CIC_TEST_CONFIG: Final[DatasetConfig] = DatasetConfig(
-    name="test",
-    kaggle_dataset_id="ruiluncai/attack-test-dataset/versions/1",
-    label_column="Label",
-    benign_labels=["Normal"],
-    label_mapping={
-        "BENIGN": "Normal",
-        "Benign": "Normal",
-        "DoS GoldenEye": "DoS",
-        "DoS Hulk": "DoS",
-        "DoS Slowhttptest": "DoS",
-        "DoS slowloris": "DoS",
-        "DoS-slowhttp": "DoS",
-        "DoS-hulk": "DoS",
-        "DDoS": "DDoS",
-        "DDoS-bot": "DDoS",
-        "DDoS-stomp": "DDoS",
-        "DDoS-dyn": "DDoS",
-        "DDoS-tcp": "DDoS",
-        "FTP-Patator": "Brute Force",
-        "SSH-Patator": "Brute Force",
-        "Web Attack \u2013 Brute Force": "Brute Force",
-        "Web Attack - Brute Force": "Brute Force",
-        "Web Attack \u2013 Sql Injection": "Reconnaissance",
-        "Web Attack \u2013 XSS": "Reconnaissance",
-        "Web Attack - Sql Injection": "Reconnaissance",
-        "Web Attack - XSS": "Reconnaissance",
-        "Web-sql-injection": "Reconnaissance",
-        "Web-xss": "Reconnaissance",
-        "Web-command-injection": "Reconnaissance",
-        "Infiltration": "Exploitation",
-        "Heartbleed": "Exploitation",
-        "Infiltration-mitm": "Exploitation",
-        "PortScan": "Reconnaissance",
-        "Bot": "Exploitation",
-        "slowheaders": "DoS",
-        "ddossim": "DDoS",
-        "slowread": "DoS",
-        "slowloris": "DoS",
-        "hulk": "DoS",
-        "slowbody2": "DoS",
-        "rudy": "DoS",
-        "goldeneye": "DoS",
-    },
-    column_mapping=_EXTENDED_COLUMN_MAPPING,
-)
+    @classmethod
+    def get(cls, name: str) -> DatasetConfig:
+        key = name.strip().lower()
+        if key not in cls._registry:
+            raise ValueError(f"Dataset '{name}' is not registered.")
+        return cls._registry[key]
 
-_DATASET_REGISTRY: Final[Dict[str, DatasetConfig]] = {
-    "unsw": CIC_UNSW_NB15_CONFIG,
-    "lab301": LAB_301_CONFIG,
-    "test": CIC_TEST_CONFIG,
-}
+    @classmethod
+    def list_available(cls) -> List[str]:
+        return list(cls._registry.keys())
 
 
 def get_dataset_config(name: str) -> DatasetConfig:
     key = name.strip().lower()
-    if key not in _DATASET_REGISTRY:
-        available = ", ".join(_DATASET_REGISTRY.keys())
-        raise ValueError(f"Unknown dataset '{name}'. Available: {available}")
-    return _DATASET_REGISTRY[key]
+    dataset_registry = DatasetConfig(
+        kaggle_dataset_id=key,
+        label_column="Label",
+        benign_labels=["Normal"],
+        label_mapping=_LABEL_MAPPING,
+        column_mapping=_EXTENDED_COLUMN_MAPPING,
+    )
+
+    DatasetRegistry.register(key, dataset_registry)
+    return dataset_registry
 
 
 def list_available_datasets() -> List[str]:
-    return list(_DATASET_REGISTRY.keys())
+    return DatasetRegistry.list_available()
 
 
 def download_dataset(config: DatasetConfig) -> str:
     if not config.kaggle_dataset_id:
-        raise ValueError(
+        raise UnavailableDatasetError(
             f"Dataset '{config.name}' has no kaggle_dataset_id configured. "
             f"Provide a --path manually."
         )

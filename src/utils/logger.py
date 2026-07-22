@@ -45,13 +45,14 @@ class Logger:
 
             coloredlogs.install(
                 level=logging.INFO,
-                fmt="%(asctime)s  %(levelname)-5s ThreadId(%(thread)d) %(name)s %(filename)s:%(lineno)d: %(message)s",
+                fmt="%(asctime)s.%(msecs)03d  %(levelname)-5s ThreadId(%(thread)d) %(name)s %(filename)s:%(lineno)d: %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
             )
 
             file_handler.setLevel(logging.INFO)
             file_handler.setFormatter(
                 logging.Formatter(
-                    "%(asctime)s  %(levelname)-5s ThreadId(%(thread)d) %(name)s %(filename)s:%(lineno)d: %(message)s",
+                    fmt="%(asctime)s.%(msecs)03d  %(levelname)-5s ThreadId(%(thread)d) %(name)s %(filename)s:%(lineno)d: %(message)s",
                     datefmt="%Y-%m-%d %H:%M:%S",
                 )
             )

@@ -25,21 +25,21 @@ if __name__ == "__main__":
         epilog=f"""
 Examples:
   # Single dataset (auto-download from Kaggle)
-  python main.py -s cic2018 -a
+  python main.py -s xxx/xxx-dataset -a
 
   # Merge multiple datasets
-  python main.py -s cic2018,unsw -a
+  python main.py -s xxx/xxx-dataset,yyy/yyy-dataset -a
 
   # All three datasets
-  python main.py -s cic2017,cic2018,unsw -a
+  python main.py -s xxx/xxx-dataset,yyy/yyy-dataset,zzz/zzz-dataset -a
 
   # Use local dataset paths (override auto-download)
-  python main.py -s cic2018 --path "/data/cic2018" -a
+  python main.py -s xxx/xxx-dataset --path "/data/xxx" -a
 
   # Run individual stages
-  python main.py -s cic2018 -dp    # Preprocess only
-  python main.py -da                # Train LSTM Autoencoder
-  python main.py -ep                # Export to ONNX
+  python main.py -s xxx/xxx-dataset -dp     # Preprocess only
+  python main.py -da                        # Train LSTM Autoencoder
+  python main.py -ep                        # Export to ONNX
 
 Available datasets: {', '.join(available)}
         """,
@@ -48,7 +48,7 @@ Available datasets: {', '.join(available)}
     parser.add_argument(
         "-s",
         "--set",
-        help=f"Dataset name(s), comma-separated ({', '.join(available)})",
+        help=f"Dataset kaggle id(s), comma-separated ({', '.join(available)})",
     )
     parser.add_argument(
         "--path",
@@ -138,6 +138,7 @@ Available datasets: {', '.join(available)}
                 da.build_autoencoder()
                 da.train_autoencoder(resume_ckpt=args.resume)
                 da.predict_autoencoder()
+                da.bootstrap_metrics()
                 da.save_results()
                 da.generate_visualizations()
 
