@@ -24,6 +24,7 @@ class Exporter:
         self.ae_clip_params: Optional[Dict[str, Dict[str, float]]] = None
         self.ae_thresholds: Optional[Dict[str, float]] = None
         self.feature_names: Optional[List[str]] = None
+        self.log_transform_features: Optional[List[str]] = None
         self.encoding_dim: Optional[int] = None
         self.window_size: Optional[int] = None
         self.inference_batch_size: Optional[int] = None
@@ -90,10 +91,12 @@ class Exporter:
             self.window_size = ae_config.get("window_size", self.window_size or 10)
             self.inference_batch_size = ae_config.get("inference_batch_size", 1024)
             self.ae_thresholds = ae_config.get("ae_thresholds", {})
+            self.log_transform_features = ae_config.get("log_transform_features", [])
 
             self.log.info(
                 f"AE config loaded ({len(self.feature_names)} features, "
-                f"thresholds={list(self.ae_thresholds.keys())})"
+                f"thresholds={list(self.ae_thresholds.keys())}, "
+                f"log1p_features={len(self.log_transform_features)})"
             )
         except Exception as e:
             self.log.error(f"Failed to load AE config: {e}")
@@ -159,6 +162,8 @@ class Exporter:
                 },
             },
             "preprocessing": {
+                # Applied first, in this order, before winsorize/scaler below.
+                "ae_log_transform_features": self.log_transform_features,
                 "ae_clip_params": ae_clip_params_json,
                 "ae_scaler": ae_scaler_params,
                 "post_scaling_clip": {
@@ -170,6 +175,7 @@ class Exporter:
 
         self.inference_config = {
             "ae_feature_names": self.feature_names,
+            "ae_log_transform_features": self.log_transform_features,
             "ae_clip_params": ae_clip_params_json,
             "ae_scaler_mean": ae_scaler_params["mean"],
             "ae_scaler_std": ae_scaler_params["std"],
