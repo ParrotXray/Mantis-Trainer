@@ -33,7 +33,10 @@ UNIFIED_FEATURE_NAMES: Final[List[str]] = [
     "bwd_iat_min",
     "flow_iat_mean",
     "pkt_len_mean",
-    "dst_port",
+    # dst_port intentionally excluded — raw port numbers are not a linear
+    # quantity (z-score saturates high ephemeral/P2P ports at the post-scaling
+    # clip boundary) and are a known shortcut-learning risk in CIC-IDS-style
+    # datasets (destination port alone predicts label with 70-100% accuracy).
     "protocol",
     "psh_flag_cnt",
     "ack_flag_cnt",

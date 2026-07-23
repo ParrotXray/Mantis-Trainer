@@ -335,6 +335,7 @@ class DeepAutoencoder:
 
         self.scaler: Optional[StandardScaler] = None
         self.clip_params: Optional[Dict[str, Dict[str, float]]] = None
+        self.log_transform_features: Optional[List[str]] = None
 
         self.autoencoder_model: Optional[LSTMAutoencoderModel] = None
         self.lightning_module: Optional[LSTMAutoencoderLightningModule] = None
@@ -473,6 +474,26 @@ class DeepAutoencoder:
         train_feat = _clean(_feat(self.benign_train))
         val_feat = _clean(_feat(self.benign_val))
         test_feat = _clean(_feat(self.test_df))
+
+        # log1p heavy-tailed features (|skew| > 1): raw z-scoring these lets the
+        # winsorize upper bound land several std past the post-scaling clip,
+        # saturating any legitimate value near that bound to the clip ceiling
+        # (confirmed for active_*/idle_*/*_iat_*/*_bytes/*_flag_cnt etc.).
+        # `protocol` is a categorical code (6/17), never log-transformed.
+        skewness = train_feat.skew()
+        self.log_transform_features = [
+            col
+            for col in train_feat.columns
+            if col != "protocol" and abs(skewness[col]) > 1.0
+        ]
+        self.log.info(
+            f"Log1p transform ({len(self.log_transform_features)} features, "
+            f"|skew| > 1.0): {self.log_transform_features}"
+        )
+        for col in self.log_transform_features:
+            train_feat[col] = np.log1p(train_feat[col].clip(lower=0))
+            val_feat[col] = np.log1p(val_feat[col].clip(lower=0))
+            test_feat[col] = np.log1p(test_feat[col].clip(lower=0))
 
         self.clip_params = {}
         for col in train_feat.columns:
@@ -889,6 +910,7 @@ class DeepAutoencoder:
             "inference_batch_size": self.config.inference_batch_size,
             "feature_names": self._feature_cols,
             "ae_thresholds": self.ae_threshold,
+            "log_transform_features": self.log_transform_features,
         }
         config_path = Path("artifacts") / "deep_ae_config.pkl"
         joblib.dump(config_data, config_path)
