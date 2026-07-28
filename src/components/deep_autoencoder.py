@@ -309,6 +309,40 @@ def _make_per_flow_sequences(
     return sequences
 
 
+def check_feature_saturation(
+    scaled: np.ndarray,
+    feature_names: List[str],
+    clip_min: float,
+    clip_max: float,
+    log: Logger,
+) -> List[Tuple[str, float, float]]:
+    """
+    Flag any column whose actual scaled min/max falls outside [clip_min, clip_max].
+    Those values get flattened to the clip ceiling regardless of how often they
+    occur in the data. Call this before post_scaling_clip is applied.
+    """
+    col_min = scaled.min(axis=0)
+    col_max = scaled.max(axis=0)
+
+    saturating = [
+        (col, float(col_min[i]), float(col_max[i]))
+        for i, col in enumerate(feature_names)
+        if col_max[i] > clip_max or col_min[i] < clip_min
+    ]
+
+    if saturating:
+        lines = [
+            f"\n{len(saturating)}/{len(feature_names)} features saturate at "
+            f"post_scaling_clip=[{clip_min}, {clip_max}] "
+            "(actual scaled values fall outside the clip range):"
+        ]
+        for col, cmin, cmax in saturating:
+            lines.append(f"  {col:<22} min={cmin:>8.3f}  max={cmax:>8.3f}")
+        log.warning("\n".join(lines))
+
+    return saturating
+
+
 class DeepAutoencoder:
     def __init__(self, config: Optional[DeepAutoencoderConfig] = None) -> None:
         self.benign_data: Optional[pd.DataFrame] = None
@@ -509,7 +543,13 @@ class DeepAutoencoder:
         self.benign_val_scaled = self.scaler.transform(val_feat)
         self.test_features_scaled = self.scaler.transform(test_feat)
 
-        self._check_feature_saturation(train_scaled_raw)
+        check_feature_saturation(
+            train_scaled_raw,
+            list(self.scaler.feature_names_in_),
+            self.config.clip_min,
+            self.config.clip_max,
+            self.log,
+        )
 
         def _clip_scaled(arr: np.ndarray) -> np.ndarray:
             return np.clip(arr, self.config.clip_min, self.config.clip_max)
@@ -519,30 +559,6 @@ class DeepAutoencoder:
         self.test_features_scaled = _clip_scaled(self.test_features_scaled)
 
         self.log.info("Preprocessing completed")
-
-    def _check_feature_saturation(self, train_scaled_raw: np.ndarray) -> None:
-        # Checked on the scaled training data itself, before post_scaling_clip
-        # is applied — any column whose actual min/max falls outside
-        # [clip_min, clip_max] here gets flattened to the clip ceiling,
-        # losing information regardless of how often it occurs in training
-        # data. Catch it before spending time training a model on top of it.
-        col_min = train_scaled_raw.min(axis=0)
-        col_max = train_scaled_raw.max(axis=0)
-
-        saturating = []
-        for i, col in enumerate(self.scaler.feature_names_in_):
-            if col_max[i] > self.config.clip_max or col_min[i] < self.config.clip_min:
-                saturating.append((col, col_min[i], col_max[i]))
-
-        if saturating:
-            lines = [
-                f"\n{len(saturating)}/{len(self._feature_cols)} features saturate at "
-                f"post_scaling_clip=[{self.config.clip_min}, {self.config.clip_max}] "
-                "(actual scaled train values fall outside the clip range):"
-            ]
-            for col, cmin, cmax in saturating:
-                lines.append(f"  {col:<22} min={cmin:>8.3f}  max={cmax:>8.3f}")
-            self.log.warning("\n".join(lines))
 
     def build_sequences(self) -> None:
         W = self.config.window_size
