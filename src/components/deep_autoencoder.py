@@ -516,7 +516,35 @@ class DeepAutoencoder:
         self.benign_val_scaled = _clip_scaled(self.benign_val_scaled)
         self.test_features_scaled = _clip_scaled(self.test_features_scaled)
 
+        self._check_feature_saturation()
+
         self.log.info("Preprocessing completed")
+
+    def _check_feature_saturation(self) -> None:
+        # Winsorize upper/lower bounds pass through the same scaler used at
+        # inference; if a bound's z-score falls outside [clip_min, clip_max]
+        # here, every value near that bound gets flattened to the clip
+        # ceiling post-scaling, losing information regardless of how often
+        # it occurs in training data. Catch it here, before spending time
+        # training a model on top of it.
+        saturating = []
+        for i, col in enumerate(self.scaler.feature_names_in_):
+            mean, std = self.scaler.mean_[i], self.scaler.scale_[i]
+            lower, upper = self.clip_params[col]["lower"], self.clip_params[col]["upper"]
+            z_lower = (lower - mean) / std
+            z_upper = (upper - mean) / std
+            if z_upper > self.config.clip_max or z_lower < self.config.clip_min:
+                saturating.append((col, z_lower, z_upper))
+
+        if saturating:
+            lines = [
+                f"\n{len(saturating)}/{len(self._feature_cols)} features saturate at "
+                f"post_scaling_clip=[{self.config.clip_min}, {self.config.clip_max}] "
+                "(winsorize bound falls outside the clip range once scaled):"
+            ]
+            for col, z_lower, z_upper in saturating:
+                lines.append(f"  {col:<22} z_lower={z_lower:>8.3f}  z_upper={z_upper:>8.3f}")
+            self.log.warning("\n".join(lines))
 
     def build_sequences(self) -> None:
         W = self.config.window_size
