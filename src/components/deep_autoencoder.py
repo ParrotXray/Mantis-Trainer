@@ -530,7 +530,10 @@ class DeepAutoencoder:
         saturating = []
         for i, col in enumerate(self.scaler.feature_names_in_):
             mean, std = self.scaler.mean_[i], self.scaler.scale_[i]
-            lower, upper = self.clip_params[col]["lower"], self.clip_params[col]["upper"]
+            lower, upper = (
+                self.clip_params[col]["lower"],
+                self.clip_params[col]["upper"],
+            )
             z_lower = (lower - mean) / std
             z_upper = (upper - mean) / std
             if z_upper > self.config.clip_max or z_lower < self.config.clip_min:
@@ -543,7 +546,9 @@ class DeepAutoencoder:
                 "(winsorize bound falls outside the clip range once scaled):"
             ]
             for col, z_lower, z_upper in saturating:
-                lines.append(f"  {col:<22} z_lower={z_lower:>8.3f}  z_upper={z_upper:>8.3f}")
+                lines.append(
+                    f"  {col:<22} z_lower={z_lower:>8.3f}  z_upper={z_upper:>8.3f}"
+                )
             self.log.warning("\n".join(lines))
 
     def build_sequences(self) -> None:
