@@ -327,6 +327,10 @@ class DeepAutoencoder:
         self.benign_val_scaled: Optional[np.ndarray] = None
         self.test_features_scaled: Optional[np.ndarray] = None
 
+        self.benign_train_scaled_raw: Optional[np.ndarray] = None
+        self.benign_val_scaled_raw: Optional[np.ndarray] = None
+        self.test_features_scaled_raw: Optional[np.ndarray] = None
+
         self.train_sequences: Optional[np.ndarray] = None
         self.val_sequences: Optional[np.ndarray] = None
 
@@ -335,6 +339,7 @@ class DeepAutoencoder:
 
         self.scaler: Optional[StandardScaler] = None
         self.clip_params: Optional[Dict[str, Dict[str, float]]] = None
+        self.log_transform_features: Optional[List[str]] = None
 
         self.autoencoder_model: Optional[LSTMAutoencoderModel] = None
         self.lightning_module: Optional[LSTMAutoencoderLightningModule] = None
@@ -421,9 +426,9 @@ class DeepAutoencoder:
 
         self.log.info(
             f"Time-based split boundaries — "
-            f"train ends: {datetime.fromtimestamp(benign_sorted['timestamp'].iloc[train_end - 1]).strftime('%Y-%m-%d %H:%M:%S')}, "
-            f"val ends: {datetime.fromtimestamp(benign_sorted['timestamp'].iloc[val_end - 1]).strftime('%Y-%m-%d %H:%M:%S')}, "
-            f"test ends: {datetime.fromtimestamp(benign_sorted['timestamp'].iloc[-1]).strftime('%Y-%m-%d %H:%M:%S')}"
+            f"train ends: {datetime.fromtimestamp(benign_sorted['timestamp'].iloc[train_end - 1] / 1000).strftime('%Y-%m-%d %H:%M:%S')}, "
+            f"val ends: {datetime.fromtimestamp(benign_sorted['timestamp'].iloc[val_end - 1] / 1000).strftime('%Y-%m-%d %H:%M:%S')}, "
+            f"test ends: {datetime.fromtimestamp(benign_sorted['timestamp'].iloc[-1] / 1000).strftime('%Y-%m-%d %H:%M:%S')}"
         )
 
         atk_meta_cols = [
@@ -474,6 +479,26 @@ class DeepAutoencoder:
         val_feat = _clean(_feat(self.benign_val))
         test_feat = _clean(_feat(self.test_df))
 
+        # log1p heavy-tailed features (|skew| > 1): raw z-scoring these lets the
+        # winsorize upper bound land several std past the post-scaling clip,
+        # saturating any legitimate value near that bound to the clip ceiling
+        # (confirmed for active_*/idle_*/*_iat_*/*_bytes/*_flag_cnt etc.).
+        # `protocol` is a categorical code (6/17), never log-transformed.
+        skewness = train_feat.skew()
+        self.log_transform_features = [
+            col
+            for col in train_feat.columns
+            if col != "protocol" and abs(skewness[col]) > 1.0
+        ]
+        self.log.info(
+            f"Log1p transform ({len(self.log_transform_features)} features, "
+            f"|skew| > 1.0): {self.log_transform_features}"
+        )
+        for col in self.log_transform_features:
+            train_feat[col] = np.log1p(train_feat[col].clip(lower=0))
+            val_feat[col] = np.log1p(val_feat[col].clip(lower=0))
+            test_feat[col] = np.log1p(test_feat[col].clip(lower=0))
+
         self.clip_params = {}
         for col in train_feat.columns:
             lower = train_feat[col].quantile(self.config.winsorize_lower)
@@ -484,18 +509,44 @@ class DeepAutoencoder:
             self.clip_params[col] = {"lower": float(lower), "upper": float(upper)}
 
         self.scaler = StandardScaler()
-        self.benign_train_scaled = self.scaler.fit_transform(train_feat)
-        self.benign_val_scaled = self.scaler.transform(val_feat)
-        self.test_features_scaled = self.scaler.transform(test_feat)
+        self.benign_train_scaled_raw = self.scaler.fit_transform(train_feat)
+        self.benign_val_scaled_raw = self.scaler.transform(val_feat)
+        self.test_features_scaled_raw = self.scaler.transform(test_feat)
+
+        self._check_feature_saturation()
 
         def _clip_scaled(arr: np.ndarray) -> np.ndarray:
             return np.clip(arr, self.config.clip_min, self.config.clip_max)
 
-        self.benign_train_scaled = _clip_scaled(self.benign_train_scaled)
-        self.benign_val_scaled = _clip_scaled(self.benign_val_scaled)
-        self.test_features_scaled = _clip_scaled(self.test_features_scaled)
+        self.benign_train_scaled = _clip_scaled(self.benign_train_scaled_raw)
+        self.benign_val_scaled = _clip_scaled(self.benign_val_scaled_raw)
+        self.test_features_scaled = _clip_scaled(self.test_features_scaled_raw)
 
         self.log.info("Preprocessing completed")
+
+    def _check_feature_saturation(self) -> None:
+        # Checked on the scaled training data itself, before post_scaling_clip
+        # is applied — any column whose actual min/max falls outside
+        # [clip_min, clip_max] here gets flattened to the clip ceiling,
+        # losing information regardless of how often it occurs in training
+        # data. Catch it before spending time training a model on top of it.
+        col_min = self.benign_train_scaled_raw.min(axis=0)
+        col_max = self.benign_train_scaled_raw.max(axis=0)
+
+        saturating = []
+        for i, col in enumerate(self.scaler.feature_names_in_):
+            if col_max[i] > self.config.clip_max or col_min[i] < self.config.clip_min:
+                saturating.append((col, col_min[i], col_max[i]))
+
+        if saturating:
+            lines = [
+                f"\n{len(saturating)}/{len(self._feature_cols)} features saturate at "
+                f"post_scaling_clip=[{self.config.clip_min}, {self.config.clip_max}] "
+                "(actual scaled train values fall outside the clip range):"
+            ]
+            for col, cmin, cmax in saturating:
+                lines.append(f"  {col:<22} min={cmin:>8.3f}  max={cmax:>8.3f}")
+            self.log.warning("\n".join(lines))
 
     def build_sequences(self) -> None:
         W = self.config.window_size
@@ -889,6 +940,7 @@ class DeepAutoencoder:
             "inference_batch_size": self.config.inference_batch_size,
             "feature_names": self._feature_cols,
             "ae_thresholds": self.ae_threshold,
+            "log_transform_features": self.log_transform_features,
         }
         config_path = Path("artifacts") / "deep_ae_config.pkl"
         joblib.dump(config_data, config_path)
