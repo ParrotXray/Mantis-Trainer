@@ -505,50 +505,43 @@ class DeepAutoencoder:
             self.clip_params[col] = {"lower": float(lower), "upper": float(upper)}
 
         self.scaler = StandardScaler()
-        self.benign_train_scaled = self.scaler.fit_transform(train_feat)
+        train_scaled_raw = self.scaler.fit_transform(train_feat)
         self.benign_val_scaled = self.scaler.transform(val_feat)
         self.test_features_scaled = self.scaler.transform(test_feat)
+
+        self._check_feature_saturation(train_scaled_raw)
 
         def _clip_scaled(arr: np.ndarray) -> np.ndarray:
             return np.clip(arr, self.config.clip_min, self.config.clip_max)
 
-        self.benign_train_scaled = _clip_scaled(self.benign_train_scaled)
+        self.benign_train_scaled = _clip_scaled(train_scaled_raw)
         self.benign_val_scaled = _clip_scaled(self.benign_val_scaled)
         self.test_features_scaled = _clip_scaled(self.test_features_scaled)
 
-        self._check_feature_saturation()
-
         self.log.info("Preprocessing completed")
 
-    def _check_feature_saturation(self) -> None:
-        # Winsorize upper/lower bounds pass through the same scaler used at
-        # inference; if a bound's z-score falls outside [clip_min, clip_max]
-        # here, every value near that bound gets flattened to the clip
-        # ceiling post-scaling, losing information regardless of how often
-        # it occurs in training data. Catch it here, before spending time
-        # training a model on top of it.
+    def _check_feature_saturation(self, train_scaled_raw: np.ndarray) -> None:
+        # Checked on the scaled training data itself, before post_scaling_clip
+        # is applied — any column whose actual min/max falls outside
+        # [clip_min, clip_max] here gets flattened to the clip ceiling,
+        # losing information regardless of how often it occurs in training
+        # data. Catch it before spending time training a model on top of it.
+        col_min = train_scaled_raw.min(axis=0)
+        col_max = train_scaled_raw.max(axis=0)
+
         saturating = []
         for i, col in enumerate(self.scaler.feature_names_in_):
-            mean, std = self.scaler.mean_[i], self.scaler.scale_[i]
-            lower, upper = (
-                self.clip_params[col]["lower"],
-                self.clip_params[col]["upper"],
-            )
-            z_lower = (lower - mean) / std
-            z_upper = (upper - mean) / std
-            if z_upper > self.config.clip_max or z_lower < self.config.clip_min:
-                saturating.append((col, z_lower, z_upper))
+            if col_max[i] > self.config.clip_max or col_min[i] < self.config.clip_min:
+                saturating.append((col, col_min[i], col_max[i]))
 
         if saturating:
             lines = [
                 f"\n{len(saturating)}/{len(self._feature_cols)} features saturate at "
                 f"post_scaling_clip=[{self.config.clip_min}, {self.config.clip_max}] "
-                "(winsorize bound falls outside the clip range once scaled):"
+                "(actual scaled train values fall outside the clip range):"
             ]
-            for col, z_lower, z_upper in saturating:
-                lines.append(
-                    f"  {col:<22} z_lower={z_lower:>8.3f}  z_upper={z_upper:>8.3f}"
-                )
+            for col, cmin, cmax in saturating:
+                lines.append(f"  {col:<22} min={cmin:>8.3f}  max={cmax:>8.3f}")
             self.log.warning("\n".join(lines))
 
     def build_sequences(self) -> None:
