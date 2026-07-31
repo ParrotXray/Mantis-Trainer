@@ -278,6 +278,27 @@ def _make_train_sequences(
     return np.stack(sequences).astype(np.float32)
 
 
+def _make_synthetic_sequences(
+    scaled: np.ndarray,
+    window_size: int,
+    n_synthetic: int,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """
+    Draw window_size rows at random (with replacement) from the whole scaled
+    benign pool, ignoring src_ip/time, and stitch them into synthetic
+    sequences. Widens the combinations of interleaved flow types seen in
+    training beyond whatever happened to co-occur in the captured order —
+    train-only, never used for val/test.
+    """
+    n_rows = scaled.shape[0]
+    if n_rows == 0 or n_synthetic <= 0:
+        return np.empty((0, window_size, scaled.shape[1]), dtype=np.float32)
+
+    indices = rng.integers(0, n_rows, size=(n_synthetic, window_size))
+    return scaled[indices].astype(np.float32)
+
+
 def _make_per_flow_sequences(
     df: pd.DataFrame,
     scaled: np.ndarray,
@@ -568,6 +589,23 @@ class DeepAutoencoder:
         self.train_sequences = _make_train_sequences(
             self.benign_train, self.benign_train_scaled, W, S
         )
+
+        n_synthetic = int(
+            len(self.train_sequences) * self.config.synthetic_augmentation_ratio
+        )
+        if n_synthetic > 0:
+            rng = np.random.default_rng(self.config.split_random_state)
+            synthetic_sequences = _make_synthetic_sequences(
+                self.benign_train_scaled, W, n_synthetic, rng
+            )
+            self.train_sequences = np.concatenate(
+                [self.train_sequences, synthetic_sequences], axis=0
+            )
+            self.log.info(
+                f"Added {n_synthetic:,} synthetic combination sequences "
+                f"(ratio={self.config.synthetic_augmentation_ratio})"
+            )
+
         self.val_sequences = _make_train_sequences(
             self.benign_val, self.benign_val_scaled, W, S
         )

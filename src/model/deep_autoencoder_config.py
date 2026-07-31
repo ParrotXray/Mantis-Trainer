@@ -32,3 +32,10 @@ class DeepAutoencoderConfig:
 
     # Adds ||z||^2 to loss, compressing BENIGN latent vectors toward origin to widen the gap with attack flows.
     latent_norm_weight: float = 1e-3
+
+    # Fraction of extra training sequences to synthesize by drawing window_size
+    # flows at random from the whole scaled benign pool (src_ip/time ignored),
+    # widening the combinations of interleaved flow types seen during
+    # training beyond what naturally co-occurred in the captured order.
+    # 0 disables it. Train-only — val/test stay untouched for honest eval.
+    synthetic_augmentation_ratio: float = 0.2
