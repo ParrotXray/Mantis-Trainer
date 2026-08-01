@@ -277,6 +277,7 @@ def _make_train_sequences(
         return np.empty((0, window_size, n_features), dtype=np.float32)
     return np.stack(sequences).astype(np.float32)
 
+
 def _make_synthetic_sequences(
     scaled: np.ndarray,
     window_size: int,
@@ -296,6 +297,7 @@ def _make_synthetic_sequences(
 
     indices = rng.integers(0, n_rows, size=(n_synthetic, window_size))
     return scaled[indices].astype(np.float32)
+
 
 def _make_per_flow_sequences(
     df: pd.DataFrame,
@@ -591,7 +593,7 @@ class DeepAutoencoder:
                 f"Added {n_synthetic:,} synthetic combination sequences "
                 f"(ratio={self.config.synthetic_augmentation_ratio})"
             )
-        
+
         self.val_sequences = _make_train_sequences(
             self.benign_val, self.benign_val_scaled, W, S
         )
