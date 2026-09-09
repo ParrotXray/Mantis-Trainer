@@ -18,6 +18,7 @@ class DeepAutoencoderConfig:
     dropout: float = 0.2
 
     learning_rate: float = 0.001
+    weight_decay: float = 1e-5
     clipnorm: float = 1.0
     batch_size: int = 8192
     inference_batch_size: int = 1024

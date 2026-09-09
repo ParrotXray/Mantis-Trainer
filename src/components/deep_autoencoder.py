@@ -173,6 +173,7 @@ class LSTMAutoencoderLightningModule(L.LightningModule):
         self,
         model: LSTMAutoencoderModel,
         learning_rate: float = 0.001,
+        weight_decay: float = 1e-5,
         clipnorm: float = 1.0,
         reduce_lr_factor: float = 0.5,
         reduce_lr_patience: int = 5,
@@ -182,6 +183,7 @@ class LSTMAutoencoderLightningModule(L.LightningModule):
         super().__init__()
         self.model = model
         self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
         self.clipnorm = clipnorm
         self.reduce_lr_factor = reduce_lr_factor
         self.reduce_lr_patience = reduce_lr_patience
@@ -226,9 +228,10 @@ class LSTMAutoencoderLightningModule(L.LightningModule):
         return loss
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(
+        optimizer = torch.optim.AdamW(
             self.parameters(),
             lr=self.learning_rate,
+            weight_decay=self.weight_decay,
         )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
@@ -637,6 +640,7 @@ class DeepAutoencoder:
         self.lightning_module = LSTMAutoencoderLightningModule(
             model=self.autoencoder_model,
             learning_rate=self.config.learning_rate,
+            weight_decay=self.config.weight_decay,
             clipnorm=self.config.clipnorm,
             reduce_lr_factor=self.config.reduce_lr_factor,
             reduce_lr_patience=self.config.reduce_lr_patience,
