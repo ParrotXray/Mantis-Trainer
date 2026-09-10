@@ -170,6 +170,28 @@ docker run --ipc=host --gpus all \
   ghcr.io/parrotxray/mantis-trainer:master
 ```
 
+### Interactive Launcher (Docker)
+
+Running the container with `-it` and no stage env var set (`ALL`/`DATAPREPROCESS`/
+`DEEPAUTOENCODER`/`EXPORT` all unset) launches the same TUI picker described under
+[Usage → Interactive Launcher](#interactive-launcher): check off which stage(s) to run and,
+if Data Preprocessing is checked, type the Kaggle dataset id(s) and an optional local path
+override.
+
+```bash
+docker run --ipc=host --gpus all -it \
+  -v ./src/outputs:/app/src/outputs \
+  -v ./src/artifacts:/app/src/artifacts \
+  -v ./src/plots:/app/src/plots \
+  -v ./src/exports:/app/src/exports \
+  -v ./src/logs:/app/src/logs \
+  ghcr.io/parrotxray/mantis-trainer:master
+```
+
+Setting any stage env var (as in the previous section) skips the picker entirely, same as
+passing a stage flag on the CLI. Without `-it`, or with no stage env var set and no TTY,
+the container just prints help and exits — same as running `./main.py` headless.
+
 ### Live Training Dashboard
 
 When the LSTM autoencoder training step (`--deepautoencoder`) runs in an interactive
@@ -177,7 +199,7 @@ terminal, it launches a live TUI dashboard (epoch/batch progress, loss curves, c
 metrics) instead of plain log lines. It falls back to the original plain-text progress
 automatically when stdin/stdout aren't a TTY (piped output, `docker run -d`, CI), so
 nothing changes for headless/detached runs. To see the dashboard when running the
-container, add `-it`:
+container, add `-it` and set the stage env var (skipping the picker above):
 
 ```bash
 docker run --ipc=host --gpus all -it \
