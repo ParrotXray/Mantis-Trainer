@@ -142,7 +142,10 @@ class TUIProgressCallback(L.Callback):
 
         lr = trainer.optimizers[0].param_groups[0]["lr"]
         self._safe_call(
-            self.dashboard.start_epoch, trainer.current_epoch, trainer.num_training_batches, lr
+            self.dashboard.start_epoch,
+            trainer.current_epoch,
+            trainer.num_training_batches,
+            lr,
         )
 
     def on_train_batch_end(
@@ -175,7 +178,9 @@ class TUIProgressCallback(L.Callback):
             "val_loss": float(m.get("val_loss", float("nan"))),
             "val_mae": float(m.get("val_mae", float("nan"))),
         }
-        self._safe_call(self.dashboard.end_epoch, trainer.current_epoch, metrics, elapsed)
+        self._safe_call(
+            self.dashboard.end_epoch, trainer.current_epoch, metrics, elapsed
+        )
 
 
 class LSTMAutoencoderModel(nn.Module):
@@ -753,7 +758,9 @@ class DeepAutoencoder:
         os.makedirs("./artifacts", exist_ok=True)
 
         use_tui = sys.stdin.isatty() and sys.stdout.isatty()
-        dashboard = TrainingDashboard(max_epochs=self.config.epochs) if use_tui else None
+        dashboard = (
+            TrainingDashboard(max_epochs=self.config.epochs) if use_tui else None
+        )
 
         progress_callback = (
             TUIProgressCallback(dashboard)
@@ -812,7 +819,9 @@ class DeepAutoencoder:
                         val_loader,
                         ckpt_path=resume_path or None,
                     )
-                except BaseException as exc:  # noqa: BLE001 - re-raised on the main thread below
+                except (
+                    BaseException
+                ) as exc:  # noqa: BLE001 - re-raised on the main thread below
                     fit_error.append(exc)
                 finally:
                     try:

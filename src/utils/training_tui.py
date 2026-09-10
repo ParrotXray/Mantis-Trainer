@@ -5,7 +5,15 @@ from typing import Dict, List, Optional
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.widgets import DataTable, Footer, Header, Label, ProgressBar, RichLog, Sparkline
+from textual.widgets import (
+    DataTable,
+    Footer,
+    Header,
+    Label,
+    ProgressBar,
+    RichLog,
+    Sparkline,
+)
 
 _STAT_ROWS = [
     ("epoch", "Epoch"),
@@ -35,7 +43,9 @@ class TrainingDashboard(App):
         Binding("q", "detach", "Detach (training keeps running in background)"),
     ]
 
-    def __init__(self, max_epochs: int, title: str = "Mantis Trainer — LSTM Autoencoder"):
+    def __init__(
+        self, max_epochs: int, title: str = "Mantis Trainer — LSTM Autoencoder"
+    ):
         super().__init__()
         self.max_epochs = max_epochs
         self.dashboard_title = title
@@ -50,7 +60,9 @@ class TrainingDashboard(App):
             with Horizontal(id="progress-row"):
                 with Vertical(classes="progress-box"):
                     yield Label("Epoch")
-                    yield ProgressBar(total=self.max_epochs, id="epoch-bar", show_eta=False)
+                    yield ProgressBar(
+                        total=self.max_epochs, id="epoch-bar", show_eta=False
+                    )
                 with Vertical(classes="progress-box"):
                     yield Label("Batch")
                     yield ProgressBar(total=100, id="batch-bar", show_eta=False)
@@ -86,7 +98,9 @@ class TrainingDashboard(App):
 
     def start_epoch(self, epoch: int, total_batches: int, lr: float) -> None:
         self.query_one("#epoch-bar", ProgressBar).update(progress=epoch)
-        self.query_one("#batch-bar", ProgressBar).update(total=total_batches, progress=0)
+        self.query_one("#batch-bar", ProgressBar).update(
+            total=total_batches, progress=0
+        )
         self._set_stat("epoch", f"{epoch}/{self.max_epochs}")
         self._set_stat("lr", f"{lr:.2e}")
         self.query_one("#log", RichLog).write(
@@ -111,7 +125,9 @@ class TrainingDashboard(App):
             self.val_loss_history.append(val_loss)
             self.query_one("#val-sparkline", Sparkline).data = self.val_loss_history
 
-        self._set_stat("train_loss", f"{train_loss:.6f}" if train_loss is not None else "—")
+        self._set_stat(
+            "train_loss", f"{train_loss:.6f}" if train_loss is not None else "—"
+        )
         self._set_stat("val_loss", f"{val_loss:.6f}" if val_loss is not None else "—")
         self._set_stat("val_mae", f"{val_mae:.6f}" if val_mae is not None else "—")
         self._set_stat("elapsed", str(timedelta(seconds=int(time() - self.start_time))))
@@ -129,7 +145,11 @@ class TrainingDashboard(App):
         self.error = error
         if self.is_running:
             if error is not None:
-                self.query_one("#log", RichLog).write(f"[bold red]Training failed: {error}[/]")
+                self.query_one("#log", RichLog).write(
+                    f"[bold red]Training failed: {error}[/]"
+                )
             else:
-                self.query_one("#log", RichLog).write("[bold green]Training complete.[/]")
+                self.query_one("#log", RichLog).write(
+                    "[bold green]Training complete.[/]"
+                )
             self.exit()
