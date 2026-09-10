@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, VerticalScroll
@@ -17,18 +17,23 @@ class LauncherWizard(App):
     with no stage flags at all. Returns a selection dict via App.run()'s
     result (None if the user cancels), which main.py maps onto the same
     argparse.Namespace fields the CLI flags would have set — the rest of
-    the pipeline runs exactly as if those flags had been passed."""
+    the pipeline runs exactly as if those flags had been passed.
+
+    There's no fixed catalog of datasets to pick from — get_dataset_config()
+    accepts any Kaggle dataset id and only registers it on first use, so the
+    dataset field here is free text, matching -s/--set on the CLI, not a
+    selection list.
+    """
 
     CSS = """
-    #stage-list, #dataset-list { height: auto; max-height: 10; border: solid $accent; }
-    #path-input { margin-top: 1; }
+    #stage-list { height: auto; max-height: 6; border: solid $accent; }
+    #set-input, #path-input { margin-top: 1; }
     #error-msg { color: $error; margin: 1 0; }
     #button-row { margin-top: 1; height: 3; }
     """
 
-    def __init__(self, available_datasets: List[str]):
+    def __init__(self):
         super().__init__()
-        self.available_datasets = available_datasets
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -39,15 +44,13 @@ class LauncherWizard(App):
                 id="stage-list",
             )
             yield Label(
-                "Select dataset(s) (required if Data Preprocessing is checked):"
+                "Kaggle dataset id(s), comma-separated (required if Data "
+                "Preprocessing is checked), e.g. owner/dataset-name:"
             )
-            yield SelectionList[str](
-                *[Selection(name, name) for name in self.available_datasets],
-                id="dataset-list",
-            )
+            yield Input(placeholder="xxx/xxx-dataset,yyy/yyy-dataset", id="set-input")
             yield Label(
                 "Optional: local dataset path(s), comma-separated in the same "
-                "order as the datasets selected above (overrides auto-download):"
+                "order as the dataset ids above (overrides auto-download):"
             )
             yield Input(placeholder="/data/xxx,/data/yyy", id="path-input")
             yield Static("", id="error-msg")
@@ -82,11 +85,14 @@ class LauncherWizard(App):
         }
 
         if selection["datapreprocess"]:
-            datasets = list(self.query_one("#dataset-list", SelectionList).selected)
-            if not datasets:
-                error.update("Data Preprocessing needs at least one dataset selected.")
+            set_raw = self.query_one("#set-input", Input).value.strip()
+            if not set_raw:
+                error.update(
+                    "Data Preprocessing needs at least one Kaggle dataset id."
+                )
                 return
-            selection["set"] = ",".join(datasets)
+            datasets = [s.strip() for s in set_raw.split(",")]
+            selection["set"] = set_raw
 
             path_raw = self.query_one("#path-input", Input).value.strip()
             if path_raw:
@@ -94,7 +100,7 @@ class LauncherWizard(App):
                 if len(paths) != len(datasets):
                     error.update(
                         f"Path count ({len(paths)}) must match dataset "
-                        f"count ({len(datasets)})."
+                        f"id count ({len(datasets)})."
                     )
                     return
                 selection["path"] = path_raw

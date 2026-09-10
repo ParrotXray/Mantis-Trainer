@@ -90,7 +90,7 @@ Available datasets: {', '.join(available)}
     ):
         if sys.stdin.isatty() and sys.stdout.isatty():
             log.info("No stage flags given — launching interactive launcher...")
-            selection = LauncherWizard(available_datasets=available).run()
+            selection = LauncherWizard().run()
             if not selection:
                 parser.print_help()
                 sys.exit(0)
