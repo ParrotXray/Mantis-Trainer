@@ -183,6 +183,9 @@ docker run --ipc=host --gpus all -it \
 
 Press `q` to detach from the dashboard view; training keeps running in the background.
 
+To force the plain-text progress instead, even in an interactive terminal, pass
+`--no-tui` (local) or set `NO_TUI=true` (Docker).
+
 ### Environment Variables
 
 | Variable | Description |
@@ -193,6 +196,7 @@ Press `q` to detach from the dashboard view; training keeps running in the backg
 | `DATAPREPROCESS` | Run preprocessing (`true`/`false`) |
 | `DEEPAUTOENCODER` | Train autoencoder (`true`/`false`) |
 | `EXPORT` | Export to ONNX (`true`/`false`) |
+| `NO_TUI` | Force plain-text training progress even with `-it` (`true`/`false`) |
 
 ### Build Docker Image Locally
 
