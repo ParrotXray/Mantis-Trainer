@@ -121,6 +121,16 @@ chmod +x main.py
 | `-da, --deepautoencoder` | Train LSTM Autoencoder |
 | `-ep, --export` | Export model to ONNX |
 
+### Interactive Launcher
+
+Running `./main.py` with no stage flags at all (`-a`/`-dp`/`-da`/`-ep`) in an interactive
+terminal launches a TUI picker instead of just printing help: check off which stage(s) to
+run and, if Data Preprocessing is checked, pick the dataset(s) and an optional local path
+override — the same choices `-s`/`--path`/`-dp`/`-da`/`-ep` make on the command line. Any
+run that already passes stage flags skips the picker entirely and behaves exactly as
+before. Non-interactive runs (piped output, `docker run -d`, CI) fall back to printing
+help, same as before.
+
 ## Threshold Selection
 
 After training, the pipeline prints a threshold analysis table derived from the **BENIGN-only validation set** (no attack labels involved):

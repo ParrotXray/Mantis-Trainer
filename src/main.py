@@ -8,7 +8,7 @@ from datetime import timedelta
 
 from components import DataPreprocess, DeepAutoencoder, Exporter
 from model import download_dataset, get_dataset_config, list_available_datasets
-from utils import Logger, pipeline_stage
+from utils import LauncherWizard, Logger, pipeline_stage
 
 if __name__ == "__main__":
     Logger.setup_logging()
@@ -88,8 +88,20 @@ Available datasets: {', '.join(available)}
             args.export,
         ]
     ):
-        parser.print_help()
-        sys.exit(0)
+        if sys.stdin.isatty() and sys.stdout.isatty():
+            log.info("No stage flags given — launching interactive launcher...")
+            selection = LauncherWizard(available_datasets=available).run()
+            if not selection:
+                parser.print_help()
+                sys.exit(0)
+            args.datapreprocess = selection["datapreprocess"]
+            args.deepautoencoder = selection["deepautoencoder"]
+            args.export = selection["export"]
+            args.set = selection["set"]
+            args.path = selection["path"]
+        else:
+            parser.print_help()
+            sys.exit(0)
 
     if args.all or args.datapreprocess:
         data_preproces_start = time.perf_counter()
