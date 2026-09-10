@@ -160,6 +160,29 @@ docker run --ipc=host --gpus all \
   ghcr.io/parrotxray/mantis-trainer:master
 ```
 
+### Live Training Dashboard
+
+When the LSTM autoencoder training step (`--deepautoencoder`) runs in an interactive
+terminal, it launches a live TUI dashboard (epoch/batch progress, loss curves, current
+metrics) instead of plain log lines. It falls back to the original plain-text progress
+automatically when stdin/stdout aren't a TTY (piped output, `docker run -d`, CI), so
+nothing changes for headless/detached runs. To see the dashboard when running the
+container, add `-it`:
+
+```bash
+docker run --ipc=host --gpus all -it \
+  -v ./src/outputs:/app/src/outputs \
+  -v ./src/artifacts:/app/src/artifacts \
+  -v ./src/plots:/app/src/plots \
+  -v ./src/exports:/app/src/exports \
+  -v ./src/logs:/app/src/logs \
+  -e DATASET="lab301,test" \
+  -e DEEPAUTOENCODER=true \
+  ghcr.io/parrotxray/mantis-trainer:master
+```
+
+Press `q` to detach from the dashboard view; training keeps running in the background.
+
 ### Environment Variables
 
 | Variable | Description |

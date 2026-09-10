@@ -1,4 +1,7 @@
+import logging
 import os
+import sys
+import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -35,7 +38,7 @@ from model import (
     DeepAutoencoderConfig,
     TrainingError,
 )
-from utils import Logger
+from utils import Logger, TrainingDashboard
 
 matplotlib.use("Agg")
 
@@ -104,6 +107,75 @@ class PlainProgressCallback(L.Callback):
             f"val_mae={float(m.get('val_mae', float('nan'))):.6f}  "
             f"lr={lr:.2e}"
         )
+
+
+class TUIProgressCallback(L.Callback):
+    """Live textual-dashboard progress for interactive TTY sessions.
+
+    Runs alongside a Trainer.fit() call executing on a background thread
+    while the TrainingDashboard owns the main thread's event loop, so every
+    UI update crosses threads via App.call_from_thread(). If the dashboard
+    has already exited (user detached, or it errored), updates are dropped
+    rather than raising — a UI glitch must never take training down with it.
+    """
+
+    def __init__(self, dashboard: TrainingDashboard, print_every_n_batches: int = 10):
+        super().__init__()
+        self.dashboard = dashboard
+        self.print_every_n_batches = print_every_n_batches
+        self._train_loss_sum: float = 0.0
+        self._batch_count: int = 0
+        self._epoch_start: float = time.time()
+
+    def _safe_call(self, fn, *args) -> None:
+        try:
+            self.dashboard.call_from_thread(fn, *args)
+        except Exception:
+            pass
+
+    def on_train_epoch_start(
+        self, trainer: L.Trainer, pl_module: L.LightningModule
+    ) -> None:
+        self._epoch_start = time.time()
+        self._train_loss_sum = 0.0
+        self._batch_count = 0
+
+        lr = trainer.optimizers[0].param_groups[0]["lr"]
+        self._safe_call(
+            self.dashboard.start_epoch, trainer.current_epoch, trainer.num_training_batches, lr
+        )
+
+    def on_train_batch_end(
+        self,
+        trainer: L.Trainer,
+        pl_module: L.LightningModule,
+        outputs,
+        batch,
+        batch_idx: int,
+    ) -> None:
+        loss = outputs["loss"].item() if isinstance(outputs, dict) else float(outputs)
+        self._train_loss_sum += loss
+        self._batch_count += 1
+
+        if (batch_idx + 1) % self.print_every_n_batches == 0:
+            avg = self._train_loss_sum / self._batch_count
+            lr = trainer.optimizers[0].param_groups[0]["lr"]
+            self._safe_call(self.dashboard.update_batch, batch_idx + 1, avg, lr)
+
+    def on_validation_epoch_end(
+        self, trainer: L.Trainer, pl_module: L.LightningModule
+    ) -> None:
+        if self._batch_count == 0:
+            return
+
+        elapsed = time.time() - self._epoch_start
+        m = trainer.callback_metrics
+        metrics = {
+            "train_loss": float(m.get("train_loss", float("nan"))),
+            "val_loss": float(m.get("val_loss", float("nan"))),
+            "val_mae": float(m.get("val_mae", float("nan"))),
+        }
+        self._safe_call(self.dashboard.end_epoch, trainer.current_epoch, metrics, elapsed)
 
 
 class LSTMAutoencoderModel(nn.Module):
@@ -680,11 +752,17 @@ class DeepAutoencoder:
 
         os.makedirs("./artifacts", exist_ok=True)
 
+        use_tui = sys.stdin.isatty() and sys.stdout.isatty()
+        dashboard = TrainingDashboard(max_epochs=self.config.epochs) if use_tui else None
+
+        progress_callback = (
+            TUIProgressCallback(dashboard)
+            if use_tui
+            else PlainProgressCallback(logger=self.log, print_every_n_batches=50)
+        )
+
         callbacks = [
-            PlainProgressCallback(
-                logger=self.log,
-                print_every_n_batches=50,
-            ),
+            progress_callback,
             EarlyStopping(
                 monitor="val_loss",
                 patience=self.config.early_stopping_patience,
@@ -722,12 +800,51 @@ class DeepAutoencoder:
         else:
             self.log.info("No checkpoint provided, starting training from scratch...")
 
-        trainer.fit(
-            self.lightning_module,
-            train_loader,
-            val_loader,
-            ckpt_path=resume_path or None,
-        )
+        if use_tui:
+            self.log.info("Interactive terminal detected — launching TUI dashboard...")
+            fit_error: List[BaseException] = []
+
+            def _run_fit() -> None:
+                try:
+                    trainer.fit(
+                        self.lightning_module,
+                        train_loader,
+                        val_loader,
+                        ckpt_path=resume_path or None,
+                    )
+                except BaseException as exc:  # noqa: BLE001 - re-raised on the main thread below
+                    fit_error.append(exc)
+                finally:
+                    try:
+                        dashboard.call_from_thread(
+                            dashboard.finish, fit_error[0] if fit_error else None
+                        )
+                    except Exception:
+                        pass
+
+            # Lightning's own verbose EarlyStopping/ModelCheckpoint logging writes
+            # straight to the terminal via the standard logging module, which
+            # would corrupt the dashboard's alternate-screen rendering.
+            lightning_logger = logging.getLogger("lightning.pytorch")
+            prev_lightning_level = lightning_logger.level
+            lightning_logger.setLevel(logging.WARNING)
+            try:
+                fit_thread = threading.Thread(target=_run_fit, daemon=True)
+                fit_thread.start()
+                dashboard.run()
+                fit_thread.join()
+            finally:
+                lightning_logger.setLevel(prev_lightning_level)
+
+            if fit_error:
+                raise fit_error[0]
+        else:
+            trainer.fit(
+                self.lightning_module,
+                train_loader,
+                val_loader,
+                ckpt_path=resume_path or None,
+            )
 
         best_model_path = callbacks[2].best_model_path
         if best_model_path:
