@@ -38,7 +38,9 @@ class LauncherWizard(App):
                 *[Selection(label, value) for label, value in _STAGE_OPTIONS],
                 id="stage-list",
             )
-            yield Label("Select dataset(s) (required if Data Preprocessing is checked):")
+            yield Label(
+                "Select dataset(s) (required if Data Preprocessing is checked):"
+            )
             yield SelectionList[str](
                 *[Selection(name, name) for name in self.available_datasets],
                 id="dataset-list",
