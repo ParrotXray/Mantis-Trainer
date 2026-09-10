@@ -87,9 +87,7 @@ class LauncherWizard(App):
         if selection["datapreprocess"]:
             set_raw = self.query_one("#set-input", Input).value.strip()
             if not set_raw:
-                error.update(
-                    "Data Preprocessing needs at least one Kaggle dataset id."
-                )
+                error.update("Data Preprocessing needs at least one Kaggle dataset id.")
                 return
             datasets = [s.strip() for s in set_raw.split(",")]
             selection["set"] = set_raw
