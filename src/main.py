@@ -77,12 +77,6 @@ Available datasets: {', '.join(available)}
         default=None,
         help="Resume training from checkpoint (e.g. ./artifacts/autoencoder_temp-v14.ckpt)",
     )
-    parser.add_argument(
-        "--no-tui",
-        action="store_true",
-        help="Force plain-text training progress even in an interactive terminal "
-        "(the TUI dashboard is used automatically when stdin/stdout are a TTY)",
-    )
 
     args = parser.parse_args()
 
@@ -142,7 +136,7 @@ Available datasets: {', '.join(available)}
                 da.preprocess_data()
                 da.build_sequences()
                 da.build_autoencoder()
-                da.train_autoencoder(resume_ckpt=args.resume, disable_tui=args.no_tui)
+                da.train_autoencoder(resume_ckpt=args.resume)
                 da.predict_autoencoder()
                 da.bootstrap_metrics()
                 da.save_results()

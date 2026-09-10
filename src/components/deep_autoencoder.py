@@ -728,9 +728,7 @@ class DeepAutoencoder:
         total_params = sum(p.numel() for p in self.autoencoder_model.parameters())
         self.log.info(f"Total parameters: {total_params:,}")
 
-    def train_autoencoder(
-        self, resume_ckpt: Optional[Path] = None, disable_tui: bool = False
-    ) -> None:
+    def train_autoencoder(self, resume_ckpt: Optional[Path] = None) -> None:
         self.log.info("Training LSTM Deep Autoencoder with PyTorch Lightning...")
 
         train_dataset = TensorDataset(torch.FloatTensor(self.train_sequences))
@@ -759,7 +757,7 @@ class DeepAutoencoder:
 
         os.makedirs("./artifacts", exist_ok=True)
 
-        use_tui = not disable_tui and sys.stdin.isatty() and sys.stdout.isatty()
+        use_tui = sys.stdin.isatty() and sys.stdout.isatty()
         dashboard = (
             TrainingDashboard(max_epochs=self.config.epochs) if use_tui else None
         )

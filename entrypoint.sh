@@ -17,6 +17,5 @@ fi
 [ "$DEEPAUTOENCODER" = "true" ] && CMD="$CMD --deepautoencoder"
 [ "$EXPORT" = "true" ] && CMD="$CMD --export"
 [ -n "$RESUME" ] && CMD="$CMD --resume $RESUME"
-[ "$NO_TUI" = "true" ] && CMD="$CMD --no-tui"
 
 exec $CMD "$@"

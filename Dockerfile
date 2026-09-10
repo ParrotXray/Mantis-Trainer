@@ -13,7 +13,6 @@ ENV DATAPREPROCESS="false"
 ENV DEEPAUTOENCODER="false"
 ENV CLASSIFIER="false"
 ENV EXPORT="false"
-ENV NO_TUI="false"
 
 WORKDIR /app
 
