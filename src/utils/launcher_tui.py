@@ -3,7 +3,16 @@ from typing import Dict, Optional
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Center, Horizontal, Vertical, VerticalScroll
-from textual.widgets import Button, Footer, Header, Input, SelectionList, Static
+from textual.widgets import (
+    Button,
+    Footer,
+    Header,
+    Input,
+    RadioButton,
+    RadioSet,
+    SelectionList,
+    Static,
+)
 from textual.widgets.selection_list import Selection
 
 _STAGE_OPTIONS = [
@@ -58,6 +67,20 @@ class LauncherWizard(App):
     .panel:focus-within { border: round $accent; border-title-color: $accent; }
     .hint { color: $text-muted; margin-bottom: 1; }
     #stage-list { height: auto; border: none; padding: 0; background: transparent; }
+    #data-panel { display: none; }
+    #data-panel.visible { display: block; }
+    #source-set {
+        layout: horizontal;
+        width: 100%;
+        height: auto;
+        border: none;
+        padding: 0;
+        margin-bottom: 1;
+        background: transparent;
+    }
+    #source-set RadioButton { width: auto; margin-right: 4; background: transparent; }
+    #path-group { height: auto; display: none; }
+    #path-group.visible { display: block; }
     #error-msg { height: auto; margin-top: 1; color: $error; text-style: bold; display: none; }
     #error-msg.visible { display: block; }
     #button-row { height: auto; margin-top: 1; align-horizontal: right; }
@@ -110,27 +133,31 @@ class LauncherWizard(App):
                             id="stage-list",
                         )
 
-                    with Vertical(classes="panel") as datasets:
-                        datasets.border_title = "② Kaggle dataset id(s)"
-                        datasets.border_subtitle = "required for preprocessing"
+                    with Vertical(classes="panel", id="data-panel") as data:
+                        data.border_title = "② Data source"
+                        data.border_subtitle = "for Data Preprocessing"
+                        with RadioSet(id="source-set"):
+                            yield RadioButton(
+                                "Download from Kaggle", value=True, id="src-kaggle"
+                            )
+                            yield RadioButton("Use local files", id="src-local")
                         yield Static(
-                            "Comma-separated, e.g. [b]owner/dataset-name[/b]",
+                            "Kaggle dataset id(s), comma-separated, "
+                            "e.g. [b]owner/dataset-name[/b]",
                             classes="hint",
                         )
                         yield Input(
                             placeholder="xxx/xxx-dataset,yyy/yyy-dataset",
                             id="set-input",
                         )
-
-                    with Vertical(classes="panel") as paths:
-                        paths.border_title = "③ Local dataset path(s)"
-                        paths.border_subtitle = "optional"
-                        yield Static(
-                            "Same order as the dataset ids above — "
-                            "overrides auto-download",
-                            classes="hint",
-                        )
-                        yield Input(placeholder="/data/xxx,/data/yyy", id="path-input")
+                        with Vertical(id="path-group"):
+                            yield Static(
+                                "Local directory per dataset id, same order",
+                                classes="hint",
+                            )
+                            yield Input(
+                                placeholder="/data/xxx,/data/yyy", id="path-input"
+                            )
 
                     yield Static("", id="error-msg")
                     with Horizontal(id="button-row"):
@@ -141,6 +168,17 @@ class LauncherWizard(App):
     def on_mount(self) -> None:
         self.title = "Mantis Trainer"
         self.sub_title = "Launcher"
+
+    def on_selection_list_selected_changed(
+        self, event: SelectionList.SelectedChanged
+    ) -> None:
+        wants_data = "datapreprocess" in event.selection_list.selected
+        self.query_one("#data-panel").set_class(wants_data, "visible")
+
+    def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
+        self.query_one("#path-group").set_class(
+            event.pressed.id == "src-local", "visible"
+        )
 
     def action_start(self) -> None:
         self._submit()
@@ -185,8 +223,11 @@ class LauncherWizard(App):
             datasets = [s.strip() for s in set_raw.split(",")]
             selection["set"] = set_raw
 
-            path_raw = self.query_one("#path-input", Input).value.strip()
-            if path_raw:
+            if self.query_one("#src-local", RadioButton).value:
+                path_raw = self.query_one("#path-input", Input).value.strip()
+                if not path_raw:
+                    self._show_error("Local files needs a path for each dataset id.")
+                    return
                 paths = [p.strip() for p in path_raw.split(",")]
                 if len(paths) != len(datasets):
                     self._show_error(
