@@ -40,3 +40,8 @@ class DeepAutoencoderConfig:
     # training beyond what naturally co-occurred in the captured order.
     # 0 disables it. Train-only — val/test stay untouched for honest eval.
     synthetic_augmentation_ratio: float = 0.2
+
+    # --finetune: learning_rate is multiplied by this when starting from a
+    # pretrained model, so the new data nudges the weights instead of
+    # overwriting what was learned in pretraining.
+    finetune_lr_scale: float = 0.1

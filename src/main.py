@@ -41,6 +41,10 @@ Examples:
   python main.py -da                        # Train LSTM Autoencoder
   python main.py -ep                        # Export to ONNX
 
+  # Pretrain on one dataset, then fine-tune on another
+  python main.py -s xxx/xxx-dataset -dp -da  # pretrain -> ./artifacts
+  python main.py -s yyy/yyy-dataset -dp -da --finetune
+
 Available datasets: {', '.join(available)}
         """,
     )
@@ -77,6 +81,21 @@ Available datasets: {', '.join(available)}
         default=None,
         help="Resume training from checkpoint (e.g. ./artifacts/autoencoder_temp-v14.ckpt)",
     )
+    parser.add_argument(
+        "--finetune",
+        nargs="?",
+        const="./artifacts",
+        default=None,
+        metavar="DIR",
+        help="Fine-tune from a pretrained model directory containing "
+        "deep_autoencoder.pt + deep_ae_config.pkl (default: ./artifacts). "
+        "Reuses its preprocessing and architecture, trains at a reduced lr.",
+    )
+    parser.add_argument(
+        "--freeze-encoder",
+        action="store_true",
+        help="With --finetune/--resume: freeze the encoder, train only the decoder",
+    )
 
     args = parser.parse_args()
 
@@ -99,9 +118,16 @@ Available datasets: {', '.join(available)}
             args.export = selection["export"]
             args.set = selection["set"]
             args.path = selection["path"]
+            args.finetune = selection["finetune"]
+            args.freeze_encoder = selection["freeze_encoder"]
         else:
             parser.print_help()
             sys.exit(0)
+
+    if args.resume and args.finetune:
+        parser.error("--resume and --finetune can't be used together")
+    if args.freeze_encoder and not (args.finetune or args.resume):
+        parser.error("--freeze-encoder needs --finetune or --resume")
 
     if args.all or args.datapreprocess:
         data_preproces_start = time.perf_counter()
@@ -141,14 +167,19 @@ Available datasets: {', '.join(available)}
         deep_autoencoder_start = time.perf_counter()
 
         with pipeline_stage("LSTM Deep Autoencoder"):
-            with DeepAutoencoder() as da:
+            with DeepAutoencoder(
+                resume_ckpt=args.resume,
+                finetune_from=args.finetune,
+                freeze_encoder=args.freeze_encoder,
+            ) as da:
                 da.check_environment()
+                da.load_previous_artifacts()
                 da.load_data()
                 da.prepare_data()
                 da.preprocess_data()
                 da.build_sequences()
                 da.build_autoencoder()
-                da.train_autoencoder(resume_ckpt=args.resume)
+                da.train_autoencoder()
                 da.predict_autoencoder()
                 da.bootstrap_metrics()
                 da.save_results()

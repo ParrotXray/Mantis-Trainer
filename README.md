@@ -120,6 +120,40 @@ chmod +x main.py
 | `-dp, --datapreprocess` | Run data preprocessing |
 | `-da, --deepautoencoder` | Train LSTM Autoencoder |
 | `-ep, --export` | Export model to ONNX |
+| `--resume CKPT` | Resume an interrupted training run from a Lightning checkpoint |
+| `--finetune [DIR]` | Fine-tune from a pretrained model in `DIR` (default `./artifacts`) |
+| `--freeze-encoder` | With `--finetune`/`--resume`: freeze the encoder, train only the decoder |
+
+### Pretraining and Fine-tuning
+
+Train a base model on one dataset, then adapt it to another:
+
+```bash
+# 1. Pretrain — a normal training run, writes ./artifacts
+./main.py -s xxx/xxx-dataset -dp -da
+
+# 2. Fine-tune on new data, starting from the pretrained model
+./main.py -s yyy/yyy-dataset -dp -da --finetune
+./main.py -s yyy/yyy-dataset -dp -da --finetune ./my-base-model --freeze-encoder
+```
+
+Fine-tuning:
+
+- **reuses the pretrained preprocessing** (log-transformed features, winsorize bounds,
+  `StandardScaler`) instead of refitting it, so the new data is scaled exactly like the data
+  the weights were trained on. The new data must contain every feature the pretrained model used.
+- **adopts the pretrained architecture** (`hidden_size`, `num_layers`, `encoding_dim`,
+  `window_size`, `dropout`), overriding the config defaults.
+- loads only the weights — a fresh optimizer, LR scheduler, early stopping and epoch count —
+  at `learning_rate × finetune_lr_scale` (default `0.1`, in `DeepAutoencoderConfig`).
+- recomputes thresholds on the new validation set.
+- when fine-tuning from `./artifacts`, copies the pretrained `deep_autoencoder.pt` /
+  `deep_ae_config.pkl` to `artifacts/pretrained_<timestamp>/` before overwriting them.
+
+`--resume` is different: it continues an interrupted run (optimizer, scheduler and epoch count
+included). Every fresh training run saves its fitted preprocessing to
+`artifacts/deep_ae_preprocess.pkl`, and `--resume` reuses that file from the checkpoint's
+directory instead of refitting, so a resumed run sees identically scaled inputs.
 
 ### Interactive Launcher
 
@@ -127,7 +161,9 @@ Running `./main.py` with no stage flags at all (`-a`/`-dp`/`-da`/`-ep`) in an in
 terminal launches a TUI picker instead of just printing help: check off which stage(s) to
 run and, if Data Preprocessing is checked, type the Kaggle dataset id(s) (comma-separated,
 e.g. `owner/dataset-name` — there's no preset catalog to pick from, same as `-s/--set` on
-the command line) and an optional local path override. Any run that already passes stage
+the command line) and an optional local path override. If Train LSTM Deep Autoencoder is
+checked, you can also choose to fine-tune from a pretrained model directory, optionally
+with the encoder frozen. Any run that already passes stage
 flags skips the picker entirely and behaves exactly as before. Non-interactive runs (piped
 output, `docker run -d`, CI) fall back to printing help, same as before.
 

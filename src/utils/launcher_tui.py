@@ -1,10 +1,11 @@
-from typing import Dict, Optional
+from typing import Dict, Optional, Union
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Center, Horizontal, Vertical, VerticalScroll
 from textual.widgets import (
     Button,
+    Checkbox,
     Footer,
     Header,
     Input,
@@ -67,9 +68,9 @@ class LauncherWizard(App):
     .panel:focus-within { border: round $accent; border-title-color: $accent; }
     .hint { color: $text-muted; margin-bottom: 1; }
     #stage-list { height: auto; border: none; padding: 0; background: transparent; }
-    #data-panel { display: none; }
-    #data-panel.visible { display: block; }
-    #source-set {
+    #data-panel, #train-panel { display: none; }
+    #data-panel.visible, #train-panel.visible { display: block; }
+    #source-set, #mode-set {
         layout: horizontal;
         width: 100%;
         height: auto;
@@ -78,9 +79,10 @@ class LauncherWizard(App):
         margin-bottom: 1;
         background: transparent;
     }
-    #source-set RadioButton { width: auto; margin-right: 4; background: transparent; }
-    #path-group { height: auto; display: none; }
-    #path-group.visible { display: block; }
+    #source-set RadioButton, #mode-set RadioButton { width: auto; margin-right: 4; background: transparent; }
+    #path-group, #finetune-group { height: auto; display: none; }
+    #path-group.visible, #finetune-group.visible { display: block; }
+    #freeze-check { background: transparent; border: none; padding: 0; margin-bottom: 1; }
     #error-msg { height: auto; margin-top: 1; color: $error; text-style: bold; display: none; }
     #error-msg.visible { display: block; }
     #button-row { height: auto; margin-top: 1; align-horizontal: right; }
@@ -123,7 +125,7 @@ class LauncherWizard(App):
                     yield Static("Anomaly-detection training pipeline", id="subtitle")
 
                     with Vertical(classes="panel") as stages:
-                        stages.border_title = "① Pipeline stages"
+                        stages.border_title = "Pipeline stages"
                         stages.border_subtitle = "space to toggle"
                         yield SelectionList[str](
                             *[
@@ -134,7 +136,7 @@ class LauncherWizard(App):
                         )
 
                     with Vertical(classes="panel", id="data-panel") as data:
-                        data.border_title = "② Data source"
+                        data.border_title = "Data source"
                         data.border_subtitle = "for Data Preprocessing"
                         with RadioSet(id="source-set"):
                             yield RadioButton(
@@ -159,6 +161,28 @@ class LauncherWizard(App):
                                 placeholder="/data/xxx,/data/yyy", id="path-input"
                             )
 
+                    with Vertical(classes="panel", id="train-panel") as train:
+                        train.border_title = "Training mode"
+                        train.border_subtitle = "for LSTM Autoencoder"
+                        with RadioSet(id="mode-set"):
+                            yield RadioButton(
+                                "Train from scratch", value=True, id="mode-scratch"
+                            )
+                            yield RadioButton(
+                                "Fine-tune pretrained model", id="mode-finetune"
+                            )
+                        with Vertical(id="finetune-group"):
+                            yield Static(
+                                "Directory with deep_autoencoder.pt + "
+                                "deep_ae_config.pkl",
+                                classes="hint",
+                            )
+                            yield Input(value="./artifacts", id="finetune-input")
+                            yield Checkbox(
+                                "Freeze encoder (train decoder only)",
+                                id="freeze-check",
+                            )
+
                     yield Static("", id="error-msg")
                     with Horizontal(id="button-row"):
                         yield Button("Cancel", id="cancel-btn")
@@ -172,13 +196,21 @@ class LauncherWizard(App):
     def on_selection_list_selected_changed(
         self, event: SelectionList.SelectedChanged
     ) -> None:
-        wants_data = "datapreprocess" in event.selection_list.selected
-        self.query_one("#data-panel").set_class(wants_data, "visible")
+        selected = event.selection_list.selected
+        self.query_one("#data-panel").set_class("datapreprocess" in selected, "visible")
+        self.query_one("#train-panel").set_class(
+            "deepautoencoder" in selected, "visible"
+        )
 
     def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
-        self.query_one("#path-group").set_class(
-            event.pressed.id == "src-local", "visible"
-        )
+        if event.radio_set.id == "source-set":
+            self.query_one("#path-group").set_class(
+                event.pressed.id == "src-local", "visible"
+            )
+        elif event.radio_set.id == "mode-set":
+            self.query_one("#finetune-group").set_class(
+                event.pressed.id == "mode-finetune", "visible"
+            )
 
     def action_start(self) -> None:
         self._submit()
@@ -205,12 +237,14 @@ class LauncherWizard(App):
             self._show_error("Pick at least one stage.")
             return
 
-        selection: Dict[str, Optional[str]] = {
+        selection: Dict[str, Union[bool, str, None]] = {
             "datapreprocess": "datapreprocess" in stages,
             "deepautoencoder": "deepautoencoder" in stages,
             "export": "export" in stages,
             "set": None,
             "path": None,
+            "finetune": None,
+            "freeze_encoder": False,
         }
 
         if selection["datapreprocess"]:
@@ -236,5 +270,18 @@ class LauncherWizard(App):
                     )
                     return
                 selection["path"] = path_raw
+
+        if (
+            selection["deepautoencoder"]
+            and self.query_one("#mode-finetune", RadioButton).value
+        ):
+            finetune_dir = self.query_one("#finetune-input", Input).value.strip()
+            if not finetune_dir:
+                self._show_error("Fine-tuning needs a pretrained model directory.")
+                return
+            selection["finetune"] = finetune_dir
+            selection["freeze_encoder"] = self.query_one(
+                "#freeze-check", Checkbox
+            ).value
 
         self.exit(result=selection)

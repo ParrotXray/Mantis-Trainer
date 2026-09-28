@@ -1,5 +1,6 @@
 import logging
 import os
+import shutil
 import sys
 import threading
 import time
@@ -410,8 +411,24 @@ def _make_per_flow_sequences(
     return sequences
 
 
+# Everything preprocess_data() fits on the training split. Saved on every
+# fresh run so --resume can reuse it, and part of deep_ae_config.pkl so
+# --finetune can reuse the pretrained model's preprocessing.
+_PREPROCESS_KEYS = ("scaler", "clip_params", "log_transform_features", "feature_names")
+_PREPROCESS_FILE = "deep_ae_preprocess.pkl"
+_ARCH_KEYS = ("hidden_size", "num_layers", "encoding_dim", "window_size", "dropout")
+_MODEL_FILE = "deep_autoencoder.pt"
+_CONFIG_FILE = "deep_ae_config.pkl"
+
+
 class DeepAutoencoder:
-    def __init__(self, config: Optional[DeepAutoencoderConfig] = None) -> None:
+    def __init__(
+        self,
+        config: Optional[DeepAutoencoderConfig] = None,
+        resume_ckpt: Optional[str] = None,
+        finetune_from: Optional[str] = None,
+        freeze_encoder: bool = False,
+    ) -> None:
         self.benign_data: Optional[pd.DataFrame] = None
         self.attack_data: Optional[pd.DataFrame] = None
 
@@ -453,6 +470,19 @@ class DeepAutoencoder:
 
         self.feature_names: List[str] = UNIFIED_FEATURE_NAMES
 
+        if resume_ckpt and finetune_from:
+            raise TrainingError("--resume and --finetune can't be used together.")
+        self.resume_ckpt = resume_ckpt
+        self.finetune_from: Optional[Path] = (
+            Path(finetune_from) if finetune_from else None
+        )
+        self.freeze_encoder = freeze_encoder
+
+        # Set by load_previous_artifacts(): preprocessing params to reuse
+        # instead of refitting, and (finetune only) the pretrained checkpoint.
+        self._reused_preprocess: Optional[Dict] = None
+        self._pretrained: Optional[Dict] = None
+
     def __enter__(self):
         return self
 
@@ -477,6 +507,70 @@ class DeepAutoencoder:
         else:
             self.log.info("GPU: No GPU detected, using CPU")
 
+    def load_previous_artifacts(self) -> None:
+        """Load what --resume / --finetune need before any data is touched.
+
+        Both modes must see inputs scaled exactly like the weights they start
+        from were trained on, so the fitted preprocessing is reused rather
+        than refit on the current data. --finetune additionally loads the
+        pretrained weights and adopts their architecture.
+        """
+        if self.finetune_from is not None:
+            model_path = self.finetune_from / _MODEL_FILE
+            config_path = self.finetune_from / _CONFIG_FILE
+            for path in (model_path, config_path):
+                if not path.exists():
+                    raise TrainingError(
+                        f"--finetune needs {path} (from a completed training run)."
+                    )
+
+            self._pretrained = torch.load(
+                model_path, map_location="cpu", weights_only=False
+            )
+            self._reused_preprocess = self._pick_preprocess(joblib.load(config_path))
+
+            self._adopt_architecture(self._pretrained)
+
+            self.log.info(f"Fine-tuning from pretrained model: {model_path}")
+            self.log.info(
+                f"Adopted pretrained architecture — hidden={self.config.hidden_size}, "
+                f"layers={self.config.num_layers}, "
+                f"bottleneck={self.config.encoding_dim}, "
+                f"window={self.config.window_size}"
+            )
+            return
+
+        if self.resume_ckpt:
+            ckpt_dir = Path(self.resume_ckpt).parent
+            for name in (_PREPROCESS_FILE, _CONFIG_FILE):
+                path = ckpt_dir / name
+                if path.exists():
+                    saved = joblib.load(path)
+                    self._reused_preprocess = self._pick_preprocess(saved)
+                    if "architecture" in saved:
+                        # The checkpoint may come from a --finetune run whose
+                        # architecture differs from the config defaults.
+                        self._adopt_architecture(saved["architecture"])
+                    self.log.info(f"Resume: reusing preprocessing params from {path}")
+                    return
+            self.log.warning(
+                f"Resume: no {_PREPROCESS_FILE} or {_CONFIG_FILE} next to "
+                f"{self.resume_ckpt} — refitting preprocessing on current data. "
+                f"Results only match the checkpoint if the data is unchanged."
+            )
+
+    def _adopt_architecture(self, source: Dict) -> None:
+        for key in _ARCH_KEYS:
+            cast = float if key == "dropout" else int
+            setattr(self.config, key, cast(source[key]))
+
+    @staticmethod
+    def _pick_preprocess(saved: Dict) -> Dict:
+        missing = [k for k in _PREPROCESS_KEYS if saved.get(k) is None]
+        if missing:
+            raise TrainingError(f"Saved preprocessing params missing: {missing}")
+        return {k: saved[k] for k in _PREPROCESS_KEYS}
+
     def load_data(self) -> None:
         self.log.info("Loading data from outputs/preprocessing_benign.parquet...")
         self.benign_data = pd.read_parquet("./outputs/preprocessing_benign.parquet")
@@ -496,9 +590,21 @@ class DeepAutoencoder:
     def prepare_data(self) -> None:
         self.log.info("Preparing data (time-based split)...")
 
-        available_features = [
-            f for f in self.feature_names if f in self.benign_data.columns
-        ]
+        if self._reused_preprocess is not None:
+            # Feature set and order are fixed by the reused scaler / weights.
+            available_features = list(self._reused_preprocess["feature_names"])
+            missing = [
+                f for f in available_features if f not in self.benign_data.columns
+            ]
+            if missing:
+                raise TrainingError(
+                    f"Data is missing features the reused model was trained on: "
+                    f"{missing}"
+                )
+        else:
+            available_features = [
+                f for f in self.feature_names if f in self.benign_data.columns
+            ]
         self.log.info(
             f"Using {len(available_features)}/{len(self.feature_names)} "
             f"flow features for LSTM AE"
@@ -585,12 +691,17 @@ class DeepAutoencoder:
         # saturating any legitimate value near that bound to the clip ceiling
         # (confirmed for active_*/idle_*/*_iat_*/*_bytes/*_flag_cnt etc.).
         # `protocol` is a categorical code (6/17), never log-transformed.
-        skewness = train_feat.skew()
-        self.log_transform_features = [
-            col
-            for col in train_feat.columns
-            if col != "protocol" and abs(skewness[col]) > 1.0
-        ]
+        reused = self._reused_preprocess
+        if reused is not None:
+            self.log.info("Reusing saved preprocessing params (not refitting)")
+            self.log_transform_features = list(reused["log_transform_features"])
+        else:
+            skewness = train_feat.skew()
+            self.log_transform_features = [
+                col
+                for col in train_feat.columns
+                if col != "protocol" and abs(skewness[col]) > 1.0
+            ]
         self.log.info(
             f"Log1p transform ({len(self.log_transform_features)} features, "
             f"|skew| > 1.0): {self.log_transform_features}"
@@ -600,17 +711,27 @@ class DeepAutoencoder:
             val_feat[col] = np.log1p(val_feat[col].clip(lower=0))
             test_feat[col] = np.log1p(test_feat[col].clip(lower=0))
 
-        self.clip_params = {}
+        self.clip_params = dict(reused["clip_params"]) if reused is not None else {}
         for col in train_feat.columns:
-            lower = train_feat[col].quantile(self.config.winsorize_lower)
-            upper = train_feat[col].quantile(self.config.winsorize_upper)
+            if reused is not None:
+                lower = self.clip_params[col]["lower"]
+                upper = self.clip_params[col]["upper"]
+            else:
+                lower = train_feat[col].quantile(self.config.winsorize_lower)
+                upper = train_feat[col].quantile(self.config.winsorize_upper)
+                self.clip_params[col] = {"lower": float(lower), "upper": float(upper)}
             train_feat[col] = np.clip(train_feat[col], lower, upper)
             val_feat[col] = np.clip(val_feat[col], lower, upper)
             test_feat[col] = np.clip(test_feat[col], lower, upper)
-            self.clip_params[col] = {"lower": float(lower), "upper": float(upper)}
 
-        self.scaler = StandardScaler()
-        self.benign_train_scaled_raw = self.scaler.fit_transform(train_feat)
+        if reused is not None:
+            self.scaler = reused["scaler"]
+            self.benign_train_scaled_raw = self.scaler.transform(train_feat)
+        else:
+            self.scaler = StandardScaler()
+            self.benign_train_scaled_raw = self.scaler.fit_transform(train_feat)
+        if not self.resume_ckpt:
+            self._save_preprocess_params()
         self.benign_val_scaled_raw = self.scaler.transform(val_feat)
         self.test_features_scaled_raw = self.scaler.transform(test_feat)
 
@@ -624,6 +745,21 @@ class DeepAutoencoder:
         self.test_features_scaled = _clip_scaled(self.test_features_scaled_raw)
 
         self.log.info("Preprocessing completed")
+
+    def _save_preprocess_params(self) -> None:
+        os.makedirs("./artifacts", exist_ok=True)
+        path = Path("artifacts") / _PREPROCESS_FILE
+        joblib.dump(
+            {
+                "scaler": self.scaler,
+                "clip_params": self.clip_params,
+                "log_transform_features": self.log_transform_features,
+                "feature_names": self._feature_cols,
+                "architecture": {k: getattr(self.config, k) for k in _ARCH_KEYS},
+            },
+            path,
+        )
+        self.log.info(f"Saved preprocessing params for --resume: {path}")
 
     def _check_feature_saturation(self) -> None:
         # Checked on the scaled training data itself, before post_scaling_clip
@@ -714,9 +850,33 @@ class DeepAutoencoder:
             dropout=self.config.dropout,
         )
 
+        learning_rate = self.config.learning_rate
+        if self._pretrained is not None:
+            pretrained_dim = int(self._pretrained["input_dim"])
+            if pretrained_dim != input_dim:
+                raise TrainingError(
+                    f"Pretrained model input_dim={pretrained_dim} doesn't match "
+                    f"current feature count {input_dim}."
+                )
+            self.autoencoder_model.load_state_dict(self._pretrained["model_state_dict"])
+            learning_rate *= self.config.finetune_lr_scale
+            self.log.info(
+                f"Loaded pretrained weights — fine-tune lr={learning_rate:.2e} "
+                f"({self.config.finetune_lr_scale}× base)"
+            )
+
+        if self.freeze_encoder:
+            for module in (
+                self.autoencoder_model.encoder_lstm,
+                self.autoencoder_model.encoder_fc,
+            ):
+                for param in module.parameters():
+                    param.requires_grad = False
+            self.log.info("Encoder frozen — only the decoder is trained")
+
         self.lightning_module = LSTMAutoencoderLightningModule(
             model=self.autoencoder_model,
-            learning_rate=self.config.learning_rate,
+            learning_rate=learning_rate,
             weight_decay=self.config.weight_decay,
             clipnorm=self.config.clipnorm,
             reduce_lr_factor=self.config.reduce_lr_factor,
@@ -726,10 +886,14 @@ class DeepAutoencoder:
         )
 
         total_params = sum(p.numel() for p in self.autoencoder_model.parameters())
-        self.log.info(f"Total parameters: {total_params:,}")
+        trainable = sum(
+            p.numel() for p in self.autoencoder_model.parameters() if p.requires_grad
+        )
+        self.log.info(f"Total parameters: {total_params:,} (trainable: {trainable:,})")
 
     def train_autoencoder(self, resume_ckpt: Optional[Path] = None) -> None:
         self.log.info("Training LSTM Deep Autoencoder with PyTorch Lightning...")
+        resume_ckpt = resume_ckpt or self.resume_ckpt
 
         train_dataset = TensorDataset(torch.FloatTensor(self.train_sequences))
         val_dataset = TensorDataset(torch.FloatTensor(self.val_sequences))
@@ -1084,7 +1248,9 @@ class DeepAutoencoder:
             f"\nAE val thresholds saved to pkl: {list(self.ae_threshold.keys())}"
         )
 
-        model_ae_path = Path("artifacts") / "deep_autoencoder.pt"
+        self._archive_pretrained()
+
+        model_ae_path = Path("artifacts") / _MODEL_FILE
         torch.save(
             {
                 "model_state_dict": self.autoencoder_model.state_dict(),
@@ -1109,10 +1275,26 @@ class DeepAutoencoder:
             "feature_names": self._feature_cols,
             "ae_thresholds": self.ae_threshold,
             "log_transform_features": self.log_transform_features,
+            "finetuned_from": str(self.finetune_from) if self.finetune_from else None,
         }
-        config_path = Path("artifacts") / "deep_ae_config.pkl"
+        config_path = Path("artifacts") / _CONFIG_FILE
         joblib.dump(config_data, config_path)
         self.log.info(f"Saved: {config_path}")
+
+    def _archive_pretrained(self) -> None:
+        """Fine-tuning from ./artifacts would overwrite the pretrained model;
+        keep a copy so it can be restored or fine-tuned from again."""
+        if self.finetune_from is None:
+            return
+        if self.finetune_from.resolve() != Path("artifacts").resolve():
+            return
+        archive_dir = Path("artifacts") / f"pretrained_{self.datestamp}"
+        os.makedirs(archive_dir, exist_ok=True)
+        for name in (_MODEL_FILE, _CONFIG_FILE):
+            src = Path("artifacts") / name
+            if src.exists():
+                shutil.copy2(src, archive_dir / name)
+        self.log.info(f"Archived pretrained model to {archive_dir}")
 
     def generate_visualizations(self) -> None:
         self.log.info("Generating visualizations...")
