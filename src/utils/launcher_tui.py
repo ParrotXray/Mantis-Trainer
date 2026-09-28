@@ -61,7 +61,25 @@ class LauncherWizard(App):
     #error-msg { height: auto; margin-top: 1; color: $error; text-style: bold; display: none; }
     #error-msg.visible { display: block; }
     #button-row { height: auto; margin-top: 1; align-horizontal: right; }
-    #button-row Button { margin-left: 2; min-width: 14; }
+    #button-row Button {
+        margin-left: 2;
+        min-width: 14;
+        height: 3;
+        border: round $panel-lighten-2;
+        background: transparent;
+        color: $text-muted;
+        text-style: bold;
+        &:hover { border: round $foreground 50%; color: $foreground; background: transparent; }
+        &:focus { text-style: bold; border: round $foreground; color: $foreground; background: transparent; }
+        &.-active { background: transparent; tint: transparent; color: $foreground; }
+    }
+    #button-row #start-btn {
+        border: round $success;
+        color: $success;
+        &:hover { border: round $success-lighten-1; color: $success-lighten-1; background: transparent; }
+        &:focus { border: round $success-lighten-2; color: $success-lighten-2; background: transparent; }
+        &.-active { background: transparent; color: $foreground; }
+    }
     """
 
     BINDINGS = [
@@ -116,8 +134,8 @@ class LauncherWizard(App):
 
                     yield Static("", id="error-msg")
                     with Horizontal(id="button-row"):
-                        yield Button("Cancel", id="cancel-btn", variant="default")
-                        yield Button("▶ Start", id="start-btn", variant="success")
+                        yield Button("Cancel", id="cancel-btn")
+                        yield Button("▶  Start", id="start-btn")
         yield Footer()
 
     def on_mount(self) -> None:
