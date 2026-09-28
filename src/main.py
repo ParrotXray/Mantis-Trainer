@@ -5,6 +5,7 @@ import argparse
 import sys
 import time
 from datetime import timedelta
+from pathlib import Path
 
 from components import DataPreprocess, DeepAutoencoder, Exporter
 from model import download_dataset, get_dataset_config, list_available_datasets
@@ -40,6 +41,7 @@ Examples:
   python main.py -s xxx/xxx-dataset -dp     # Preprocess only
   python main.py -da                        # Train LSTM Autoencoder
   python main.py -ep                        # Export to ONNX
+  python main.py --view-plots               # Browse the latest run's plots
 
   # Pretrain on one dataset, then fine-tune on another
   python main.py -s xxx/xxx-dataset -dp -da  # pretrain -> ./artifacts
@@ -77,6 +79,12 @@ Available datasets: {', '.join(available)}
     )
 
     parser.add_argument(
+        "--view-plots",
+        action="store_true",
+        help="Browse the latest training run's plots in the terminal",
+    )
+
+    parser.add_argument(
         "--resume",
         default=None,
         help="Resume training from checkpoint (e.g. ./artifacts/autoencoder_temp-v14.ckpt)",
@@ -98,6 +106,9 @@ Available datasets: {', '.join(available)}
     )
 
     args = parser.parse_args()
+    interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    results_plots = []
+    results_summary = None
 
     if not any(
         [
@@ -105,9 +116,10 @@ Available datasets: {', '.join(available)}
             args.datapreprocess,
             args.deepautoencoder,
             args.export,
+            args.view_plots,
         ]
     ):
-        if sys.stdin.isatty() and sys.stdout.isatty():
+        if interactive:
             log.info("No stage flags given — launching interactive launcher...")
             selection = LauncherWizard().run()
             if not selection:
@@ -184,6 +196,8 @@ Available datasets: {', '.join(available)}
                 da.bootstrap_metrics()
                 da.save_results()
                 da.generate_visualizations()
+                results_plots = list(da.plot_paths)
+                results_summary = da.results_summary()
 
         deep_autoencoder_end = time.perf_counter()
         log.info(
@@ -211,3 +225,16 @@ Available datasets: {', '.join(available)}
     total_end = time.perf_counter()
 
     log.info(f"Execution time: {timedelta(seconds=(total_end - total_start))}")
+
+    if args.view_plots and not interactive:
+        log.warning("--view-plots needs an interactive terminal (docker run -it)")
+    elif interactive and (results_plots or args.view_plots):
+        # Lazy import: textual-image probes the terminal's graphics support
+        # at import time, which only makes sense right before showing it.
+        from utils.results_tui import ResultsViewer, latest_plot_set
+
+        results_plots = results_plots or latest_plot_set(Path("plots"))
+        if results_plots:
+            ResultsViewer(results_plots, summary=results_summary).run()
+        else:
+            log.warning("--view-plots: no training plots found in ./plots")

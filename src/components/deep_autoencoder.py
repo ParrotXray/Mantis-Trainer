@@ -483,6 +483,10 @@ class DeepAutoencoder:
         self._reused_preprocess: Optional[Dict] = None
         self._pretrained: Optional[Dict] = None
 
+        # For the post-run results viewer.
+        self.plot_paths: List[Path] = []
+        self.test_auc: Optional[Tuple[float, float, float]] = None
+
     def __enter__(self):
         return self
 
@@ -1197,6 +1201,7 @@ class DeepAutoencoder:
         point_auc = roc_auc_score(y_true, y_score)
         lower = float(np.percentile(auc_samples, 100 * alpha))
         upper = float(np.percentile(auc_samples, 100 * (1 - alpha)))
+        self.test_auc = (float(point_auc), lower, upper)
 
         self.log.info(
             f"\nBootstrap ({len(auc_samples)}/{n_bootstrap} valid resamples, "
@@ -1296,6 +1301,23 @@ class DeepAutoencoder:
                 shutil.copy2(src, archive_dir / name)
         self.log.info(f"Archived pretrained model to {archive_dir}")
 
+    def results_summary(self) -> str:
+        """One-line summary for the results viewer."""
+        parts = []
+        if self.test_auc is not None:
+            point, lower, upper = self.test_auc
+            parts.append(
+                f"[b]ROC-AUC[/b] {point:.4f} [dim][{lower:.4f}, {upper:.4f}][/]"
+            )
+        if self.test_labels is not None:
+            n_attack = int((self.test_labels == 1).sum())
+            n_benign = int((self.test_labels == 0).sum())
+            parts.append(f"[b]test[/b] {n_benign:,} benign / {n_attack:,} attack")
+        if self.finetune_from is not None:
+            frozen = ", encoder frozen" if self.freeze_encoder else ""
+            parts.append(f"[b]fine-tuned from[/b] {self.finetune_from}{frozen}")
+        return "   ·   ".join(parts)
+
     def generate_visualizations(self) -> None:
         self.log.info("Generating visualizations...")
 
@@ -1360,6 +1382,7 @@ class DeepAutoencoder:
         plt.tight_layout()
         plot_path = Path("plots") / f"deep_ae_analysis-{self.datestamp}.png"
         plt.savefig(plot_path, dpi=150, bbox_inches="tight")
+        self.plot_paths.append(plot_path)
         self.log.info(f"Saved: {plot_path}")
         plt.close()
 
@@ -1411,6 +1434,7 @@ class DeepAutoencoder:
         plt.tight_layout()
         plot_path = Path("plots") / f"deep_ae_roc_pr-{self.datestamp}.png"
         plt.savefig(plot_path, dpi=150, bbox_inches="tight")
+        self.plot_paths.append(plot_path)
         self.log.info(f"Saved: {plot_path} (AUC={roc_auc:.4f}, AP={ap:.4f})")
         plt.close()
 
@@ -1448,6 +1472,7 @@ class DeepAutoencoder:
         plt.tight_layout()
         plot_path = Path("plots") / f"deep_ae_cdf-{self.datestamp}.png"
         plt.savefig(plot_path, dpi=150, bbox_inches="tight")
+        self.plot_paths.append(plot_path)
         self.log.info(f"Saved: {plot_path}")
         plt.close()
 
@@ -1501,5 +1526,6 @@ class DeepAutoencoder:
         plt.tight_layout()
         plot_path = Path("plots") / f"deep_ae_tsne-{self.datestamp}.png"
         plt.savefig(plot_path, dpi=150, bbox_inches="tight")
+        self.plot_paths.append(plot_path)
         self.log.info(f"Saved: {plot_path}")
         plt.close()

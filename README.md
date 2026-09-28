@@ -120,9 +120,22 @@ chmod +x main.py
 | `-dp, --datapreprocess` | Run data preprocessing |
 | `-da, --deepautoencoder` | Train LSTM Autoencoder |
 | `-ep, --export` | Export model to ONNX |
+| `--view-plots` | Browse the latest training run's plots in the terminal |
 | `--resume CKPT` | Resume an interrupted training run from a Lightning checkpoint |
 | `--finetune [DIR]` | Fine-tune from a pretrained model in `DIR` (default `./artifacts`) |
 | `--freeze-encoder` | With `--finetune`/`--resume`: freeze the encoder, train only the decoder |
+
+### Viewing Result Plots in the Terminal
+
+After an interactive run that trained the autoencoder, a results viewer opens with the run's
+plots (score analysis, ROC / PR, score CDF, latent t-SNE) and a summary line (test ROC-AUC with
+its bootstrap CI). `./main.py --view-plots` reopens the most recent run's plots from `./plots`
+at any time. Pick a plot on the left with ↑/↓; `q` closes the viewer.
+
+Images render at full resolution in terminals with Sixel or Kitty graphics support (WezTerm,
+kitty, foot, recent Windows Terminal, VS Code with images enabled, ...); elsewhere they fall
+back to coloured Unicode half-blocks, which show the shape but not the axis text. Under tmux,
+enable `allow-passthrough` for the graphics protocols to get through.
 
 ### Pretraining and Fine-tuning
 
