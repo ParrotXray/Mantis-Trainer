@@ -1,12 +1,13 @@
 import math
 from datetime import timedelta
 from time import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Grid, Horizontal, Vertical
-from textual.widgets import Footer, Header, ProgressBar, RichLog, Sparkline, Static
+from textual.widgets import Footer, Header, ProgressBar, RichLog, Static
+from textual_plotext import PlotextPlot
 
 # (key, label) for the stat cards across the top of the dashboard.
 _STAT_CARDS = [
@@ -67,20 +68,16 @@ class TrainingDashboard(App):
     #progress-row Bar { width: 1fr; }
     #epoch-bar Bar > .bar--bar, #epoch-bar Bar > .bar--complete { color: $accent; }
     #batch-bar Bar > .bar--bar, #batch-bar Bar > .bar--complete { color: $primary; }
-    #chart-row { height: 9; margin-top: 1; }
-    #chart-row .panel { width: 1fr; height: 9; }
-    #chart-row .panel:first-child, #progress-row .panel:first-child { margin-right: 1; }
-    Sparkline { height: 1fr; margin: 1 0; }
-    #train-sparkline > .sparkline--max-color { color: $primary; }
-    #train-sparkline > .sparkline--min-color { color: $primary 40%; }
-    #val-sparkline > .sparkline--max-color { color: $warning; }
-    #val-sparkline > .sparkline--min-color { color: $warning 40%; }
+    #progress-row .panel:first-child { margin-right: 1; }
+    #loss-panel { height: 16; min-height: 10; margin-top: 1; padding: 0; }
+    #loss-plot { background: $surface; }
     #log-panel { height: 1fr; min-height: 6; margin: 1 0; }
     #log { background: $surface; border: none; scrollbar-size-vertical: 1; }
     """
 
     BINDINGS = [
         Binding("q", "detach", "Detach (training keeps running in background)"),
+        Binding("l", "toggle_log_scale", "Log/linear loss axis"),
     ]
 
     def __init__(
@@ -90,8 +87,11 @@ class TrainingDashboard(App):
         self.max_epochs = max_epochs
         self.dashboard_title = title
         self.start_time = time()
-        self.train_loss_history: List[float] = []
-        self.val_loss_history: List[float] = []
+        # (epoch, loss) pairs — train and val can each be missing on an epoch.
+        self.train_loss_history: List[Tuple[int, float]] = []
+        self.val_loss_history: List[Tuple[int, float]] = []
+        self.best_val_epoch: Optional[int] = None
+        self.log_scale = True
         self.best_val_loss: Optional[float] = None
         self.error: Optional[BaseException] = None
 
@@ -112,13 +112,9 @@ class TrainingDashboard(App):
                 with Vertical(classes="panel", id="batch-panel") as panel:
                     panel.border_title = "Batches"
                     yield ProgressBar(total=100, id="batch-bar", show_eta=False)
-            with Horizontal(id="chart-row"):
-                with Vertical(classes="panel", id="train-chart") as panel:
-                    panel.border_title = "Train Loss"
-                    yield Sparkline([], id="train-sparkline")
-                with Vertical(classes="panel", id="val-chart") as panel:
-                    panel.border_title = "Val Loss"
-                    yield Sparkline([], id="val-sparkline")
+            with Vertical(classes="panel", id="loss-panel") as panel:
+                panel.border_title = "Loss"
+                yield PlotextPlot(id="loss-plot")
             with Vertical(classes="panel", id="log-panel") as panel:
                 panel.border_title = "Log"
                 yield RichLog(id="log", wrap=False, highlight=True, markup=True)
@@ -128,6 +124,7 @@ class TrainingDashboard(App):
         self.title = self.dashboard_title
         self.sub_title = "● running"
         self.set_interval(1.0, self._tick_elapsed)
+        self._redraw_loss()
 
     def _tick_elapsed(self) -> None:
         self._set_stat("elapsed", str(timedelta(seconds=int(time() - self.start_time))))
@@ -167,14 +164,57 @@ class TrainingDashboard(App):
         self._set_stat("train_loss", _fmt(avg_loss))
         self._set_stat("lr", f"{lr:.2e}")
 
-    def _update_chart(
-        self, chart_id: str, panel_id: str, history: List[float], value: float
-    ) -> None:
-        history.append(value)
-        self.query_one(chart_id, Sparkline).data = list(history)
-        self.query_one(panel_id).border_subtitle = (
-            f"last {_fmt(value)} · min {_fmt(min(history))}"
+    def action_toggle_log_scale(self) -> None:
+        self.log_scale = not self.log_scale
+        self._redraw_loss()
+
+    def _redraw_loss(self) -> None:
+        plot = self.query_one("#loss-plot", PlotextPlot)
+        plt = plot.plt
+        plt.clear_data()
+        plt.xlabel("epoch")
+        has_data = bool(self.train_loss_history or self.val_loss_history)
+        # plotext crashes building an empty log-scale plot.
+        plt.yscale("log" if self.log_scale and has_data else "linear")
+        # No plotext labels: its legend box sits top-left, exactly where the
+        # high early-epoch losses are drawn. The legend lives in the panel
+        # title instead.
+        for history, color in (
+            (self.train_loss_history, "cyan"),
+            (self.val_loss_history, "orange"),
+        ):
+            if history:
+                xs, ys = zip(*history)
+                plt.plot(xs, ys, color=color, marker="braille")
+        if has_data:
+            last_epoch = max(
+                e for e, _ in self.train_loss_history + self.val_loss_history
+            )
+            step = max(1, math.ceil((last_epoch + 1) / 8))
+            plt.xticks(list(range(0, last_epoch + 1, step)))
+        if self.best_val_epoch is not None:
+            plt.scatter(
+                [self.best_val_epoch],
+                [self.best_val_loss],
+                color="green",
+                marker="●",
+            )
+        plot.refresh()
+
+        scale = "log" if self.log_scale else "linear"
+        panel = self.query_one("#loss-panel")
+        panel.border_title = (
+            "Loss  [cyan]━ train[/]  [#ff8700]━ val[/]  [green]● best[/]  "
+            f"[dim]({scale} · press l)[/]"
         )
+        parts = []
+        if self.train_loss_history:
+            parts.append(f"train {_fmt(self.train_loss_history[-1][1])}")
+        if self.val_loss_history:
+            parts.append(f"val {_fmt(self.val_loss_history[-1][1])}")
+        if self.best_val_epoch is not None:
+            parts.append(f"best {_fmt(self.best_val_loss)} @{self.best_val_epoch}")
+        panel.border_subtitle = " · ".join(parts)
 
     def end_epoch(self, epoch: int, metrics: Dict[str, float], elapsed: float) -> None:
         train_loss = metrics.get("train_loss")
@@ -182,19 +222,18 @@ class TrainingDashboard(App):
         val_mae = metrics.get("val_mae")
 
         if train_loss is not None and not math.isnan(train_loss):
-            self._update_chart(
-                "#train-sparkline", "#train-chart", self.train_loss_history, train_loss
-            )
+            self.train_loss_history.append((epoch, train_loss))
 
         improved = False
         if val_loss is not None and not math.isnan(val_loss):
-            self._update_chart(
-                "#val-sparkline", "#val-chart", self.val_loss_history, val_loss
-            )
+            self.val_loss_history.append((epoch, val_loss))
             if self.best_val_loss is None or val_loss < self.best_val_loss:
                 self.best_val_loss = val_loss
+                self.best_val_epoch = epoch
                 improved = True
                 self._set_stat("best_val", f"{_fmt(val_loss)} @{epoch}")
+
+        self._redraw_loss()
 
         self.query_one("#epoch-bar", ProgressBar).update(progress=epoch + 1)
         self.query_one("#epoch-panel").border_subtitle = (
