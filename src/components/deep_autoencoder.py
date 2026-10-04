@@ -411,6 +411,23 @@ def _make_per_flow_sequences(
     return sequences
 
 
+def _pct(rate: float) -> str:
+    return f"{rate * 100:.2f}%"
+
+
+def _precision_f1(
+    tpr: np.ndarray, fpr: np.ndarray, n_attack: int, n_benign: int
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Precision and F1 from rates. Both depend on the test set's
+    attack/benign ratio, unlike TPR/FPR."""
+    tp = tpr * n_attack
+    fp = fpr * n_benign
+    with np.errstate(divide="ignore", invalid="ignore"):
+        precision = np.where(tp + fp > 0, tp / (tp + fp), 0.0)
+        f1 = np.where(precision + tpr > 0, 2 * precision * tpr / (precision + tpr), 0.0)
+    return precision, f1
+
+
 # Everything preprocess_data() fits on the training split. Saved on every
 # fresh run so --resume can reuse it, and part of deep_ae_config.pkl so
 # --finetune can reuse the pretrained model's preprocessing.
@@ -418,6 +435,8 @@ _PREPROCESS_KEYS = ("scaler", "clip_params", "log_transform_features", "feature_
 _PREPROCESS_FILE = "deep_ae_preprocess.pkl"
 _ARCH_KEYS = ("hidden_size", "num_layers", "encoding_dim", "window_size", "dropout")
 _MODEL_FILE = "deep_autoencoder.pt"
+THRESHOLDS_CSV = Path("outputs") / "deep_ae_thresholds.csv"
+PER_CLASS_CSV = Path("outputs") / "deep_ae_per_class_tpr.csv"
 _CONFIG_FILE = "deep_ae_config.pkl"
 
 
@@ -486,6 +505,10 @@ class DeepAutoencoder:
         # For the post-run results viewer.
         self.plot_paths: List[Path] = []
         self.test_auc: Optional[Tuple[float, float, float]] = None
+        # Each val threshold applied to the test set, and per-attack-type TPR
+        # at each val threshold. Filled by predict_autoencoder().
+        self.threshold_rows: List[Dict] = []
+        self.per_class_rows: List[Dict] = []
 
     def __enter__(self):
         return self
@@ -1108,6 +1131,8 @@ class DeepAutoencoder:
         test_fpr = np.array([(ae_mse_benign > t).mean() for t in test_candidate_values])
         test_tpr = np.array([(ae_mse_attack > t).mean() for t in test_candidate_values])
         test_youden = test_tpr - test_fpr
+        n_attack, n_benign = len(ae_mse_attack), len(ae_mse_benign)
+        _, test_f1 = _precision_f1(test_tpr, test_fpr, n_attack, n_benign)
 
         # Store all val thresholds as dict — user selects manually after inspecting table
         self.ae_threshold = dict(zip(candidate_names, val_candidate_values.tolist()))
@@ -1121,21 +1146,71 @@ class DeepAutoencoder:
 
         lines = ["\nThreshold Analysis [Test Set — evaluation only]:"]
         lines.append(
-            f"{'Name':<14} {'Threshold':<14} {'FPR':<10} {'TPR':<10} {'Youden':<10}"
+            f"{'Name':<14} {'Threshold':<14} {'FPR':<10} {'TPR':<10} {'Youden':<10} {'F1':<8}"
         )
-        lines.append("-" * 58)
-        for name, thresh, fpr_p, tpr_p, youden in zip(
-            candidate_names, test_candidate_values, test_fpr, test_tpr, test_youden
+        lines.append("-" * 67)
+        for name, thresh, fpr_p, tpr_p, youden, f1 in zip(
+            candidate_names,
+            test_candidate_values,
+            test_fpr,
+            test_tpr,
+            test_youden,
+            test_f1,
         ):
             lines.append(
-                f"{name:<14} {thresh:<14.4f} {fpr_p*100:<10.2f}% {tpr_p*100:<10.2f}% {youden:<10.4f}"
+                f"{name:<14} {thresh:<14.4f} {_pct(fpr_p):<10} "
+                f"{_pct(tpr_p):<10} {youden:<10.4f} {f1:<8.4f}"
             )
+        self.log.info("\n".join(lines))
+
+        # The deployable view: each *val* threshold (what you'd actually ship,
+        # chosen without attack labels) applied to the test set.
+        dep_fpr = np.array([(ae_mse_benign > t).mean() for t in val_candidate_values])
+        dep_tpr = np.array([(ae_mse_attack > t).mean() for t in val_candidate_values])
+        dep_precision, dep_f1 = _precision_f1(dep_tpr, dep_fpr, n_attack, n_benign)
+        self.threshold_rows = [
+            {
+                "name": name,
+                "threshold": float(thresh),
+                "val_fpr": float(vfpr),
+                "test_fpr": float(fpr_p),
+                "test_tpr": float(tpr_p),
+                "precision": float(prec),
+                "f1": float(f1),
+                "youden": float(tpr_p - fpr_p),
+            }
+            for name, thresh, vfpr, fpr_p, tpr_p, prec, f1 in zip(
+                candidate_names,
+                val_candidate_values,
+                val_fpr,
+                dep_fpr,
+                dep_tpr,
+                dep_precision,
+                dep_f1,
+            )
+        ]
+
+        lines = ["\nVal thresholds applied to Test Set (deployable view):"]
+        lines.append(
+            f"{'Name':<14} {'Threshold':<14} {'FPR':<10} {'TPR':<10} "
+            f"{'Precision':<10} {'F1':<8} {'Youden':<8}"
+        )
+        lines.append("-" * 78)
+        for row in self.threshold_rows:
+            lines.append(
+                f"{row['name']:<14} {row['threshold']:<14.6f} "
+                f"{_pct(row['test_fpr']):<10} {_pct(row['test_tpr']):<10} "
+                f"{row['precision']:<10.4f} {row['f1']:<8.4f} {row['youden']:<8.4f}"
+            )
+        best_f1 = max(self.threshold_rows, key=lambda r: r["f1"])
+        lines.append(f"Best F1: {best_f1['name']} (F1={best_f1['f1']:.4f})")
         self.log.info("\n".join(lines))
 
         attack_mask = self.test_labels == 1
         attack_scores = self.ae_mse_scores[attack_mask]
         attack_labels = self.test_labels_orig[attack_mask].reset_index(drop=True)
 
+        self.per_class_rows = []
         for name, threshold in self.ae_threshold.items():
             lines = [
                 f"\nPer-class TPR @ val threshold={threshold:.4f} ({name}):",
@@ -1145,6 +1220,15 @@ class DeepAutoencoder:
                 mask = attack_labels.values == label
                 tpr = (attack_scores[mask] > threshold).mean()
                 lines.append(f"  {label:<35} TPR={tpr:.4f} ({mask.sum():>6,} samples)")
+                self.per_class_rows.append(
+                    {
+                        "threshold_name": name,
+                        "threshold": float(threshold),
+                        "attack_type": label,
+                        "tpr": float(tpr),
+                        "samples": int(mask.sum()),
+                    }
+                )
             lines.append("=" * 55)
             self.log.info("\n".join(lines))
 
@@ -1248,6 +1332,11 @@ class DeepAutoencoder:
         self.log.info(
             f"Saved: {output_path} ({len(output):,} rows, {output.shape[1]} columns)"
         )
+
+        pd.DataFrame(self.threshold_rows).to_csv(THRESHOLDS_CSV, index=False)
+        self.log.info(f"Saved: {THRESHOLDS_CSV}")
+        pd.DataFrame(self.per_class_rows).to_csv(PER_CLASS_CSV, index=False)
+        self.log.info(f"Saved: {PER_CLASS_CSV}")
 
         self.log.info(
             f"\nAE val thresholds saved to pkl: {list(self.ae_threshold.keys())}"

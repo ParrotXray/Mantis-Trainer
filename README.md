@@ -127,10 +127,18 @@ chmod +x main.py
 
 ### Viewing Result Plots in the Terminal
 
-After an interactive run that trained the autoencoder, a results viewer opens with the run's
-plots (score analysis, ROC / PR, score CDF, latent t-SNE) and a summary line (test ROC-AUC with
-its bootstrap CI). `./main.py --view-plots` reopens the most recent run's plots from `./plots`
-at any time. Pick a plot on the left with ↑/↓; `q` closes the viewer.
+After an interactive run that trained the autoencoder, a results viewer opens with a summary
+line (test ROC-AUC with its bootstrap CI), a **Thresholds** table and the run's plots (score
+analysis, ROC / PR, score CDF, latent t-SNE). `./main.py --view-plots` reopens the most recent
+results at any time. Pick an entry on the left with ↑/↓; `q` closes the viewer.
+
+The Thresholds table applies each candidate **val** threshold (the ones saved to
+`deep_ae_config.pkl`, chosen without attack labels) to the test set and shows Val FPR, test
+FPR / TPR, Precision, **F1** and Youden — ★ marks the best F1, ◆ the best Youden. Highlighting a
+row lists the per-attack-type TPR at that threshold, lowest first. Precision and F1 depend on
+the test set's attack/benign ratio, so compare them across runs only on the same test data.
+Both tables are also saved as CSV: `outputs/deep_ae_thresholds.csv` and
+`outputs/deep_ae_per_class_tpr.csv`.
 
 Images render at full resolution in terminals with Sixel or Kitty graphics support (WezTerm,
 kitty, foot, recent Windows Terminal, VS Code with images enabled, ...); elsewhere they fall

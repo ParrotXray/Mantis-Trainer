@@ -231,10 +231,10 @@ Available datasets: {', '.join(available)}
     elif interactive and (results_plots or args.view_plots):
         # Lazy import: textual-image probes the terminal's graphics support
         # at import time, which only makes sense right before showing it.
-        from utils.results_tui import ResultsViewer, latest_plot_set
+        from utils.results_tui import THRESHOLDS_CSV, ResultsViewer, latest_plot_set
 
         results_plots = results_plots or latest_plot_set(Path("plots"))
-        if results_plots:
+        if results_plots or THRESHOLDS_CSV.exists():
             ResultsViewer(results_plots, summary=results_summary).run()
         else:
-            log.warning("--view-plots: no training plots found in ./plots")
+            log.warning("--view-plots: no training plots or threshold table found")
