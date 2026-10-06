@@ -362,6 +362,8 @@ class DeepAutoencoder:
         self.clip_params: Optional[Dict[str, Dict[str, float]]] = None
         self.log_transform_features: Optional[List[str]] = None
         self.capped_features: Optional[List[str]] = None
+        # Per tail feature: whether each test flow's value is on its tail side.
+        self.tail_test_masks: Optional[Dict[str, np.ndarray]] = None
 
         self.autoencoder_model: Optional[LSTMAutoencoderModel] = None
         self.lightning_module: Optional[LSTMAutoencoderLightningModule] = None
@@ -532,7 +534,7 @@ class DeepAutoencoder:
 
         self.scaler = StandardScaler()
         self.scaler.fit(train_feat)
-        self._cap_bound_z(train_feat)
+        self._cap_bound_z(train_feat, test_feat)
 
         self.benign_train_scaled_raw = self.scaler.transform(train_feat)
         self.benign_val_scaled_raw = self.scaler.transform(val_feat)
@@ -549,7 +551,7 @@ class DeepAutoencoder:
 
         self.log.info("Preprocessing completed")
 
-    def _cap_bound_z(self, train_feat: pd.DataFrame) -> None:
+    def _cap_bound_z(self, train_feat: pd.DataFrame, test_feat: pd.DataFrame) -> None:
         # Long-tailed / zero-inflated features (e.g. rst_flag_cnt) put their
         # winsorize bound many std from the mean, letting rare-but-normal
         # values dominate the reconstruction MSE. Widen scale_ just enough
@@ -558,12 +560,20 @@ class DeepAutoencoder:
         max_z = self.config.max_bound_z
         rows = []
         self.capped_features = []
+        self.tail_test_masks = {}
         for i, col in enumerate(self.scaler.feature_names_in_):
             lo = self.clip_params[col]["lower"]
             hi = self.clip_params[col]["upper"]
             mean, std = self.scaler.mean_[i], self.scaler.scale_[i]
             at_lo = float((train_feat[col] <= lo).mean())
             z_lo, z_hi = (lo - mean) / std, (hi - mean) / std
+            if max(-z_lo, z_hi) > self.config.tail_check_z:
+                median = train_feat[col].median()
+                self.tail_test_masks[col] = (
+                    test_feat[col].values > median
+                    if z_hi >= -z_lo
+                    else test_feat[col].values < median
+                )
             new_std = std
             if max_z is not None:
                 new_std = max(std, (hi - mean) / max_z, (mean - lo) / max_z)
@@ -584,6 +594,10 @@ class DeepAutoencoder:
         self.log.info(
             f"Bound z capped at {max_z} ({len(self.capped_features)} features): "
             f"{self.capped_features}"
+        )
+        self.log.info(
+            f"Tail FPR check (bound |z| > {self.config.tail_check_z}): "
+            f"{list(self.tail_test_masks)}"
         )
 
     def _check_feature_saturation(self) -> None:
@@ -902,24 +916,22 @@ class DeepAutoencoder:
             )
         )
 
-        self._check_sparse_feature_fpr()
+        self._check_tail_feature_fpr()
 
-    def _check_sparse_feature_fpr(self) -> None:
-        # Benign FPR split by whether the scored window contains a non-zero
-        # value of a zero-inflated feature: a large gap means that feature's
-        # rare-but-normal value dominates the reconstruction error.
+    def _check_tail_feature_fpr(self) -> None:
+        # Benign FPR split by whether the scored window holds a tail value
+        # (past the train median, on the far-bound side) of a long-tailed
+        # feature: a large gap means that feature's rare-but-normal values
+        # dominate the reconstruction error.
         benign = (self.test_labels == 0).values
         scores = self.ae_mse_scores
 
-        for col in self.config.sparse_check_features:
-            if col not in self.test_df.columns:
-                self.log.warning(f"Sparse FPR check: {col} not in test set, skipped")
-                continue
-
-            nonzero = (self.test_df[col].fillna(0).values > 0).astype(np.float32)
+        for col, tail in self.tail_test_masks.items():
             in_window = (
                 _make_per_flow_sequences(
-                    self.test_df, nonzero[:, None], self.config.window_size
+                    self.test_df,
+                    tail.astype(np.float32)[:, None],
+                    self.config.window_size,
                 )
                 .max(axis=(1, 2))
                 .astype(bool)
@@ -929,14 +941,14 @@ class DeepAutoencoder:
             n_with, n_without = int(with_mask.sum()), int(without_mask.sum())
 
             lines = [
-                f"\nBenign FPR by {col} in window [Test Set]:",
-                f"  with {col}>0   : n={n_with:,}  "
+                f"\nBenign FPR by {col} tail value in window [Test Set]:",
+                f"  with tail      : n={n_with:,}  "
                 + (
                     f"median score={np.median(scores[with_mask]):.6f}"
                     if n_with
                     else "(none)"
                 ),
-                f"  with {col}=0   : n={n_without:,}  "
+                f"  without tail   : n={n_without:,}  "
                 + (
                     f"median score={np.median(scores[without_mask]):.6f}"
                     if n_without

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional
 
 
 @dataclass
@@ -16,9 +16,11 @@ class DeepAutoencoderConfig:
     # clip. Most flow features sit at z <= ~4. None disables.
     max_bound_z: Optional[float] = 4.0
 
-    # Features checked after prediction for benign false positives on flows
-    # whose window contains a non-zero value (raw > 0) of that feature.
-    sparse_check_features: Tuple[str, ...] = ("rst_flag_cnt", "psh_flag_cnt")
+    # Features whose winsorize bound sits beyond this many std (before any
+    # max_bound_z cap) get a post-prediction check of benign FPR on windows
+    # holding a tail value (past the train median) vs not. Kept separate from
+    # max_bound_z so a max_bound_z=None baseline checks the same features.
+    tail_check_z: float = 4.0
 
     fill_value: float = 0.0
 
