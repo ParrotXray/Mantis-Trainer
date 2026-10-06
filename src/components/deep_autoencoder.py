@@ -6,7 +6,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 import joblib
 import lightning as L
@@ -47,10 +47,18 @@ matplotlib.use("Agg")
 class PlainProgressCallback(L.Callback):
     """Print-based progress for Docker / non-TTY environments."""
 
-    def __init__(self, logger: Logger, print_every_n_batches: int = 50):
+    def __init__(
+        self,
+        logger: Logger,
+        print_every_n_batches: int = 50,
+        active: Optional[Callable[[], bool]] = None,
+    ):
         super().__init__()
         self.logger = logger
         self.print_every_n_batches = print_every_n_batches
+        # When given, progress is tracked every call but only logged while
+        # active() is true — lets TUIProgressCallback hand over mid-epoch.
+        self._active = active or (lambda: True)
         self._train_loss_sum: float = 0.0
         self._batch_count: int = 0
         self._epoch_start: float = time.time()
@@ -63,10 +71,11 @@ class PlainProgressCallback(L.Callback):
         self._batch_count = 0
 
         lr = trainer.optimizers[0].param_groups[0]["lr"]
-        self.logger.info(
-            f"[Epoch {trainer.current_epoch}/{trainer.max_epochs}] "
-            f"Start — {trainer.num_training_batches} batches  lr={lr:.2e}"
-        )
+        if self._active():
+            self.logger.info(
+                f"[Epoch {trainer.current_epoch}/{trainer.max_epochs}] "
+                f"Start — {trainer.num_training_batches} batches  lr={lr:.2e}"
+            )
 
     def on_train_batch_end(
         self,
@@ -80,7 +89,7 @@ class PlainProgressCallback(L.Callback):
         self._train_loss_sum += loss
         self._batch_count += 1
 
-        if (batch_idx + 1) % self.print_every_n_batches == 0:
+        if (batch_idx + 1) % self.print_every_n_batches == 0 and self._active():
             avg = self._train_loss_sum / self._batch_count
             total = trainer.num_training_batches
             pct = (batch_idx + 1) / total * 100
@@ -93,7 +102,7 @@ class PlainProgressCallback(L.Callback):
         self, trainer: L.Trainer, pl_module: L.LightningModule
     ) -> None:
         # Skip sanity check (batch_count == 0 means no training happened yet)
-        if self._batch_count == 0:
+        if self._batch_count == 0 or not self._active():
             return
 
         elapsed = time.time() - self._epoch_start
@@ -116,17 +125,30 @@ class TUIProgressCallback(L.Callback):
     Runs alongside a Trainer.fit() call executing on a background thread
     while the TrainingDashboard owns the main thread's event loop, so every
     UI update crosses threads via App.call_from_thread(). If the dashboard
-    has already exited (user detached, or it errored), updates are dropped
-    rather than raising — a UI glitch must never take training down with it.
+    has exited (user detached, or it crashed), training carries on and
+    progress continues as plain log lines — a UI glitch must never take
+    training down with it, nor leave it running silently.
     """
 
-    def __init__(self, dashboard: TrainingDashboard, print_every_n_batches: int = 10):
+    def __init__(
+        self,
+        dashboard: TrainingDashboard,
+        logger: Logger,
+        print_every_n_batches: int = 10,
+    ):
         super().__init__()
         self.dashboard = dashboard
         self.print_every_n_batches = print_every_n_batches
         self._train_loss_sum: float = 0.0
         self._batch_count: int = 0
         self._epoch_start: float = time.time()
+        # Fed every hook so its per-epoch state stays current; only logs once
+        # the dashboard is gone (its console output would corrupt the TUI).
+        self._fallback = PlainProgressCallback(
+            logger=logger,
+            print_every_n_batches=50,
+            active=lambda: not self.dashboard.is_running,
+        )
 
     def _safe_call(self, fn, *args) -> None:
         try:
@@ -137,6 +159,7 @@ class TUIProgressCallback(L.Callback):
     def on_train_epoch_start(
         self, trainer: L.Trainer, pl_module: L.LightningModule
     ) -> None:
+        self._fallback.on_train_epoch_start(trainer, pl_module)
         self._epoch_start = time.time()
         self._train_loss_sum = 0.0
         self._batch_count = 0
@@ -157,6 +180,7 @@ class TUIProgressCallback(L.Callback):
         batch,
         batch_idx: int,
     ) -> None:
+        self._fallback.on_train_batch_end(trainer, pl_module, outputs, batch, batch_idx)
         loss = outputs["loss"].item() if isinstance(outputs, dict) else float(outputs)
         self._train_loss_sum += loss
         self._batch_count += 1
@@ -169,6 +193,7 @@ class TUIProgressCallback(L.Callback):
     def on_validation_epoch_end(
         self, trainer: L.Trainer, pl_module: L.LightningModule
     ) -> None:
+        self._fallback.on_validation_epoch_end(trainer, pl_module)
         if self._batch_count == 0:
             return
 
@@ -954,7 +979,7 @@ class DeepAutoencoder:
         )
 
         progress_callback = (
-            TUIProgressCallback(dashboard)
+            TUIProgressCallback(dashboard, logger=self.log)
             if use_tui
             else PlainProgressCallback(logger=self.log, print_every_n_batches=50)
         )
@@ -1032,6 +1057,19 @@ class DeepAutoencoder:
                 fit_thread = threading.Thread(target=_run_fit, daemon=True)
                 fit_thread.start()
                 dashboard.run()
+                if fit_thread.is_alive():
+                    # Detached with 'q', or the dashboard crashed (Textual has
+                    # already printed its traceback). Training is unaffected.
+                    lightning_logger.setLevel(prev_lightning_level)
+                    reason = (
+                        "crashed"
+                        if dashboard.return_code not in (None, 0)
+                        else "closed"
+                    )
+                    self.log.warning(
+                        f"Dashboard {reason} — training continues; "
+                        f"progress is logged below and to logs/train.log."
+                    )
                 fit_thread.join()
             finally:
                 lightning_logger.setLevel(prev_lightning_level)

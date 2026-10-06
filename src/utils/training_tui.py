@@ -21,6 +21,20 @@ _STAT_CARDS = [
 ]
 
 
+def _log10(value: float) -> float:
+    # Losses are non-negative; clamp so an exact 0 can't break the axis.
+    return math.log10(max(value, 1e-12))
+
+
+def _log_ticks(lo: float, hi: float, n: int = 5) -> Tuple[List[float], List[str]]:
+    """Evenly spaced ticks across [lo, hi] in log10 space, labelled with the
+    original (un-logged) loss values."""
+    if hi - lo < 1e-9:
+        lo, hi = lo - 0.5, hi + 0.5
+    positions = [lo + (hi - lo) * i / (n - 1) for i in range(n)]
+    return positions, [f"{10 ** p:.3g}" for p in positions]
+
+
 def _fmt(value: Optional[float], spec: str = ".6f") -> str:
     if value is None or math.isnan(value):
         return "—"
@@ -174,8 +188,15 @@ class TrainingDashboard(App):
         plt.clear_data()
         plt.xlabel("epoch")
         has_data = bool(self.train_loss_history or self.val_loss_history)
-        # plotext crashes building an empty log-scale plot.
-        plt.yscale("log" if self.log_scale and has_data else "linear")
+        # Never use plotext's own yscale("log"): its build step writes the
+        # log-transformed values back into the stored series, so every
+        # re-render (terminal resize, layout change) takes log10 again until
+        # it hits a negative number and raises "math domain error". Plot
+        # log10 values on a linear axis instead and label the ticks with the
+        # real losses.
+        plt.yscale("linear")
+        to_y = _log10 if self.log_scale else (lambda v: v)
+        plotted: List[float] = []
         # No plotext labels: its legend box sits top-left, exactly where the
         # high early-epoch losses are drawn. The legend lives in the panel
         # title instead.
@@ -185,6 +206,8 @@ class TrainingDashboard(App):
         ):
             if history:
                 xs, ys = zip(*history)
+                ys = [to_y(v) for v in ys]
+                plotted.extend(ys)
                 plt.plot(xs, ys, color=color, marker="braille")
         if has_data:
             last_epoch = max(
@@ -192,10 +215,13 @@ class TrainingDashboard(App):
             )
             step = max(1, math.ceil((last_epoch + 1) / 8))
             plt.xticks(list(range(0, last_epoch + 1, step)))
+        if self.log_scale and plotted:
+            positions, labels = _log_ticks(min(plotted), max(plotted))
+            plt.yticks(positions, labels)
         if self.best_val_epoch is not None:
             plt.scatter(
                 [self.best_val_epoch],
-                [self.best_val_loss],
+                [to_y(self.best_val_loss)],
                 color="green",
                 marker="●",
             )
