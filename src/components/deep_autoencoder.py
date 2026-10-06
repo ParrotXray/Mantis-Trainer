@@ -361,6 +361,7 @@ class DeepAutoencoder:
         self.scaler: Optional[StandardScaler] = None
         self.clip_params: Optional[Dict[str, Dict[str, float]]] = None
         self.log_transform_features: Optional[List[str]] = None
+        self.minmax_features: Optional[List[str]] = None
 
         self.autoencoder_model: Optional[LSTMAutoencoderModel] = None
         self.lightning_module: Optional[LSTMAutoencoderLightningModule] = None
@@ -530,7 +531,10 @@ class DeepAutoencoder:
             self.clip_params[col] = {"lower": float(lower), "upper": float(upper)}
 
         self.scaler = StandardScaler()
-        self.benign_train_scaled_raw = self.scaler.fit_transform(train_feat)
+        self.scaler.fit(train_feat)
+        self._apply_sparse_minmax(train_feat)
+
+        self.benign_train_scaled_raw = self.scaler.transform(train_feat)
         self.benign_val_scaled_raw = self.scaler.transform(val_feat)
         self.test_features_scaled_raw = self.scaler.transform(test_feat)
 
@@ -544,6 +548,39 @@ class DeepAutoencoder:
         self.test_features_scaled = _clip_scaled(self.test_features_scaled_raw)
 
         self.log.info("Preprocessing completed")
+
+    def _apply_sparse_minmax(self, train_feat: pd.DataFrame) -> None:
+        # Zero-inflated features: z-scoring puts the rare non-zero value at
+        # sqrt((1-p)/p) std, letting it dominate the reconstruction MSE.
+        # Min-max them to [0, 1] by overriding the fitted scaler params, so the
+        # exported mean/std stays a plain affine and inference is unchanged.
+        mass = self.config.sparse_min_mass
+        rows = []
+        self.minmax_features = []
+        for i, col in enumerate(self.scaler.feature_names_in_):
+            lo = self.clip_params[col]["lower"]
+            hi = self.clip_params[col]["upper"]
+            at_lo = float((train_feat[col] <= lo).mean())
+            z_hi = (hi - self.scaler.mean_[i]) / self.scaler.scale_[i]
+            rows.append((col, at_lo, z_hi))
+            if mass is not None and at_lo >= mass and hi > lo:
+                self.scaler.mean_[i] = lo
+                self.scaler.scale_[i] = hi - lo
+                self.minmax_features.append(col)
+
+        rows.sort(key=lambda r: -r[1])
+        self.log.info(
+            "Feature mass at winsorize lower bound / z-score of upper bound:\n"
+            + "\n".join(
+                f"  {col:<22} at_lo={at_lo:7.2%}  z_hi={z_hi:8.3f}"
+                f"{'  -> min-max' if col in self.minmax_features else ''}"
+                for col, at_lo, z_hi in rows
+            )
+        )
+        self.log.info(
+            f"Min-max scaled ({len(self.minmax_features)} zero-inflated features, "
+            f"sparse_min_mass={mass}): {self.minmax_features}"
+        )
 
     def _check_feature_saturation(self) -> None:
         # Checked on the scaled training data itself, before post_scaling_clip
@@ -861,6 +898,61 @@ class DeepAutoencoder:
             )
         )
 
+        self._check_sparse_feature_fpr()
+
+    def _check_sparse_feature_fpr(self) -> None:
+        # Benign FPR split by whether the scored window contains a non-zero
+        # value of a zero-inflated feature: a large gap means that feature's
+        # rare-but-normal value dominates the reconstruction error.
+        benign = (self.test_labels == 0).values
+        scores = self.ae_mse_scores
+
+        for col in self.config.sparse_check_features:
+            if col not in self.test_df.columns:
+                self.log.warning(f"Sparse FPR check: {col} not in test set, skipped")
+                continue
+
+            nonzero = (self.test_df[col].fillna(0).values > 0).astype(np.float32)
+            in_window = (
+                _make_per_flow_sequences(
+                    self.test_df, nonzero[:, None], self.config.window_size
+                )
+                .max(axis=(1, 2))
+                .astype(bool)
+            )
+            with_mask = benign & in_window
+            without_mask = benign & ~in_window
+            n_with, n_without = int(with_mask.sum()), int(without_mask.sum())
+
+            lines = [
+                f"\nBenign FPR by {col} in window [Test Set]:",
+                f"  with {col}>0   : n={n_with:,}  "
+                + (
+                    f"median score={np.median(scores[with_mask]):.6f}"
+                    if n_with
+                    else "(none)"
+                ),
+                f"  with {col}=0   : n={n_without:,}  "
+                + (
+                    f"median score={np.median(scores[without_mask]):.6f}"
+                    if n_without
+                    else "(none)"
+                ),
+                f"{'Name':<14} {'Threshold':<14} {'FPR with':<12} {'FPR without':<12} {'Ratio':<8}",
+                "-" * 62,
+            ]
+            for name, threshold in self.ae_threshold.items():
+                fpr_with = (scores[with_mask] > threshold).mean() if n_with else 0.0
+                fpr_without = (
+                    (scores[without_mask] > threshold).mean() if n_without else 0.0
+                )
+                ratio = fpr_with / fpr_without if fpr_without > 0 else float("nan")
+                lines.append(
+                    f"{name:<14} {threshold:<14.6f} {f'{fpr_with:.2%}':<12} "
+                    f"{f'{fpr_without:.2%}':<12} {ratio:<8.2f}"
+                )
+            self.log.info("\n".join(lines))
+
     def bootstrap_metrics(
         self,
         n_bootstrap: int = 1000,
@@ -979,6 +1071,7 @@ class DeepAutoencoder:
             "feature_names": self._feature_cols,
             "ae_thresholds": self.ae_threshold,
             "log_transform_features": self.log_transform_features,
+            "minmax_features": self.minmax_features,
         }
         config_path = Path("artifacts") / "deep_ae_config.pkl"
         joblib.dump(config_data, config_path)

@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Optional, Tuple
 
 
 @dataclass
@@ -7,6 +8,18 @@ class DeepAutoencoderConfig:
     clip_max: float = 5.0
     winsorize_lower: float = 0.005
     winsorize_upper: float = 0.995
+
+    # Features whose winsorized train values sit at the lower bound at least
+    # this often (zero-inflated, e.g. rst/psh_flag_cnt) are min-max scaled to
+    # [0, 1] instead of z-scored: z-scoring puts their rare non-zero value at
+    # sqrt((1-p)/p) std, letting it dominate the reconstruction MSE.
+    # None disables (all features z-scored).
+    sparse_min_mass: Optional[float] = 0.9
+
+    # Features checked after prediction for benign false positives on flows
+    # whose window contains a non-zero value (raw > 0) of that feature.
+    sparse_check_features: Tuple[str, ...] = ("rst_flag_cnt", "psh_flag_cnt")
+
     fill_value: float = 0.0
 
     window_size: int = 15
