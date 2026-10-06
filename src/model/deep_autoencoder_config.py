@@ -9,12 +9,12 @@ class DeepAutoencoderConfig:
     winsorize_lower: float = 0.005
     winsorize_upper: float = 0.995
 
-    # Features whose winsorized train values sit at the lower bound at least
-    # this often (zero-inflated, e.g. rst/psh_flag_cnt) are min-max scaled to
-    # [0, 1] instead of z-scored: z-scoring puts their rare non-zero value at
-    # sqrt((1-p)/p) std, letting it dominate the reconstruction MSE.
-    # None disables (all features z-scored).
-    sparse_min_mass: Optional[float] = 0.9
+    # Cap on how many std a feature's winsorize bound may sit from its mean
+    # after scaling: scale_ = max(std, |bound - mean| / max_bound_z). Features
+    # whose tail is far out (e.g. zero-inflated rst_flag_cnt at z~11) would
+    # otherwise dominate the reconstruction MSE and saturate the post-scaling
+    # clip. Most flow features sit at z <= ~4. None disables.
+    max_bound_z: Optional[float] = 4.0
 
     # Features checked after prediction for benign false positives on flows
     # whose window contains a non-zero value (raw > 0) of that feature.

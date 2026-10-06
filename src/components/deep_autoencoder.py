@@ -361,7 +361,7 @@ class DeepAutoencoder:
         self.scaler: Optional[StandardScaler] = None
         self.clip_params: Optional[Dict[str, Dict[str, float]]] = None
         self.log_transform_features: Optional[List[str]] = None
-        self.minmax_features: Optional[List[str]] = None
+        self.capped_features: Optional[List[str]] = None
 
         self.autoencoder_model: Optional[LSTMAutoencoderModel] = None
         self.lightning_module: Optional[LSTMAutoencoderLightningModule] = None
@@ -532,7 +532,7 @@ class DeepAutoencoder:
 
         self.scaler = StandardScaler()
         self.scaler.fit(train_feat)
-        self._apply_sparse_minmax(train_feat)
+        self._cap_bound_z(train_feat)
 
         self.benign_train_scaled_raw = self.scaler.transform(train_feat)
         self.benign_val_scaled_raw = self.scaler.transform(val_feat)
@@ -549,37 +549,41 @@ class DeepAutoencoder:
 
         self.log.info("Preprocessing completed")
 
-    def _apply_sparse_minmax(self, train_feat: pd.DataFrame) -> None:
-        # Zero-inflated features: z-scoring puts the rare non-zero value at
-        # sqrt((1-p)/p) std, letting it dominate the reconstruction MSE.
-        # Min-max them to [0, 1] by overriding the fitted scaler params, so the
-        # exported mean/std stays a plain affine and inference is unchanged.
-        mass = self.config.sparse_min_mass
+    def _cap_bound_z(self, train_feat: pd.DataFrame) -> None:
+        # Long-tailed / zero-inflated features (e.g. rst_flag_cnt) put their
+        # winsorize bound many std from the mean, letting rare-but-normal
+        # values dominate the reconstruction MSE. Widen scale_ just enough
+        # that both bounds land within max_bound_z std; the exported mean/std
+        # stays a plain affine, so inference is unchanged.
+        max_z = self.config.max_bound_z
         rows = []
-        self.minmax_features = []
+        self.capped_features = []
         for i, col in enumerate(self.scaler.feature_names_in_):
             lo = self.clip_params[col]["lower"]
             hi = self.clip_params[col]["upper"]
+            mean, std = self.scaler.mean_[i], self.scaler.scale_[i]
             at_lo = float((train_feat[col] <= lo).mean())
-            z_hi = (hi - self.scaler.mean_[i]) / self.scaler.scale_[i]
-            rows.append((col, at_lo, z_hi))
-            if mass is not None and at_lo >= mass and hi > lo:
-                self.scaler.mean_[i] = lo
-                self.scaler.scale_[i] = hi - lo
-                self.minmax_features.append(col)
+            z_lo, z_hi = (lo - mean) / std, (hi - mean) / std
+            new_std = std
+            if max_z is not None:
+                new_std = max(std, (hi - mean) / max_z, (mean - lo) / max_z)
+            if new_std > std:
+                self.scaler.scale_[i] = new_std
+                self.capped_features.append(col)
+            rows.append((col, at_lo, z_lo, z_hi, std / new_std))
 
-        rows.sort(key=lambda r: -r[1])
+        rows.sort(key=lambda r: -max(abs(r[2]), abs(r[3])))
         self.log.info(
-            "Feature mass at winsorize lower bound / z-score of upper bound:\n"
+            "Feature mass at winsorize lower bound / z-score of bounds:\n"
             + "\n".join(
-                f"  {col:<22} at_lo={at_lo:7.2%}  z_hi={z_hi:8.3f}"
-                f"{'  -> min-max' if col in self.minmax_features else ''}"
-                for col, at_lo, z_hi in rows
+                f"  {col:<22} at_lo={at_lo:7.2%}  z_lo={z_lo:8.3f}  z_hi={z_hi:8.3f}"
+                + (f"  -> scale x{1 / ratio:.2f}" if ratio < 1 else "")
+                for col, at_lo, z_lo, z_hi, ratio in rows
             )
         )
         self.log.info(
-            f"Min-max scaled ({len(self.minmax_features)} zero-inflated features, "
-            f"sparse_min_mass={mass}): {self.minmax_features}"
+            f"Bound z capped at {max_z} ({len(self.capped_features)} features): "
+            f"{self.capped_features}"
         )
 
     def _check_feature_saturation(self) -> None:
@@ -1071,7 +1075,7 @@ class DeepAutoencoder:
             "feature_names": self._feature_cols,
             "ae_thresholds": self.ae_threshold,
             "log_transform_features": self.log_transform_features,
-            "minmax_features": self.minmax_features,
+            "capped_features": self.capped_features,
         }
         config_path = Path("artifacts") / "deep_ae_config.pkl"
         joblib.dump(config_data, config_path)
