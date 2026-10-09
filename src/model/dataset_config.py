@@ -12,6 +12,10 @@ logger = Logger(__name__)
 
 
 SEQUENCE_META_COLUMNS: Final[List[str]] = ["timestamp", "src_ip"]
+# Drain order of each flow (Mantis writes one CSV row when a flow is
+# drained, i.e. the order live inference buffers flows per src_ip).
+# Optional: windows fall back to "timestamp" order when it is absent.
+FLOW_ORDER_COLUMN: Final[str] = "flow_seq"
 
 UNIFIED_FEATURE_NAMES: Final[List[str]] = [
     "flow_duration",

@@ -1,4 +1,5 @@
 from .dataset_config import (
+    FLOW_ORDER_COLUMN,
     SEQUENCE_META_COLUMNS,
     UNIFIED_FEATURE_NAMES,
     DatasetConfig,
@@ -29,6 +30,7 @@ __all__ = (
     "list_available_datasets",
     "download_dataset",
     "UNIFIED_FEATURE_NAMES",
+    "FLOW_ORDER_COLUMN",
     "SEQUENCE_META_COLUMNS",
     "UnsupportedDatasetError",
     "UnavailableDatasetError",

@@ -30,6 +30,7 @@ from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 
 from model import (
+    FLOW_ORDER_COLUMN,
     SEQUENCE_META_COLUMNS,
     UNIFIED_FEATURE_NAMES,
     DeepAutoencoderConfig,
@@ -248,6 +249,29 @@ class LSTMAutoencoderLightningModule(L.LightningModule):
         }
 
 
+def _order_column(df: pd.DataFrame) -> str:
+    # Windows follow drain order (what live inference buffers per src_ip);
+    # parquet built before flow_seq existed falls back to flow start time.
+    return FLOW_ORDER_COLUMN if FLOW_ORDER_COLUMN in df.columns else "timestamp"
+
+
+def _window_fill(df: pd.DataFrame, window_size: int) -> np.ndarray:
+    # How many real (non-padded) flows the per-flow window ending at each row
+    # holds. Live inference skips windows below window_size (zero padding is
+    # out of distribution), so thresholds and evaluation must too.
+    if all(c in df.columns for c in SEQUENCE_META_COLUMNS):
+        order = _order_column(df)
+        rank = (
+            df[["src_ip", order]]
+            .groupby("src_ip", sort=False)[order]
+            .rank(method="first")
+            .values
+        )
+    else:
+        rank = np.arange(1, len(df) + 1)
+    return np.minimum(rank, window_size).astype(np.int64)
+
+
 def _make_train_sequences(
     df: pd.DataFrame,
     scaled: np.ndarray,
@@ -260,10 +284,11 @@ def _make_train_sequences(
     sequences: List[np.ndarray] = []
 
     if has_meta:
-        tmp = df[["src_ip", "timestamp"]].copy()
+        order = _order_column(df)
+        tmp = df[["src_ip", order]].copy()
         tmp["_pos"] = range(len(df))
         for _, group in tmp.groupby("src_ip", sort=False):
-            group_sorted = group.sort_values("timestamp")
+            group_sorted = group.sort_values(order, kind="stable")
             positions = group_sorted["_pos"].values
             n = len(positions)
             for start in range(0, n - window_size + 1, stride):
@@ -321,10 +346,11 @@ def _make_per_flow_sequences(
     has_meta = all(c in df.columns for c in SEQUENCE_META_COLUMNS)
 
     if has_meta:
-        tmp = df[["src_ip", "timestamp"]].copy()
+        order = _order_column(df)
+        tmp = df[["src_ip", order]].copy()
         tmp["_pos"] = range(n_flows)
         for _, group in tmp.groupby("src_ip", sort=False):
-            group_sorted = group.sort_values("timestamp")
+            group_sorted = group.sort_values(order, kind="stable")
             positions = group_sorted["_pos"].values
             for k, pos in enumerate(positions):
                 if out_idx[pos] < 0:
@@ -370,6 +396,9 @@ class DeepAutoencoder:
         self.val_sequences: Optional[np.ndarray] = None
 
         self.ae_mse_scores: Optional[np.ndarray] = None
+        # test_df positions of full windows — the only ones live inference
+        # scores; ae_mse_scores / test_labels* are aligned to these.
+        self.test_eval_rows: Optional[np.ndarray] = None
         self.ae_threshold: Optional[Dict[str, float]] = None
 
         self.scaler: Optional[StandardScaler] = None
@@ -447,10 +476,18 @@ class DeepAutoencoder:
                 "Time-based splits require a 'timestamp' field, but this is not present in benign_data."
             )
 
-        all_cols = available_features + meta_cols + ["Label"]
+        order_cols = [c for c in [FLOW_ORDER_COLUMN] if c in self.benign_data.columns]
+        all_cols = available_features + meta_cols + order_cols + ["Label"]
         benign_all = self.benign_data[all_cols].copy()
 
-        benign_sorted = benign_all.sort_values("timestamp").reset_index(drop=True)
+        # Split by flow start time; same-second ties keep drain order.
+        benign_sorted = benign_all.sort_values(
+            ["timestamp"] + order_cols, kind="stable"
+        ).reset_index(drop=True)
+        self.log.info(
+            f"Window order: {_order_column(benign_sorted)}"
+            + ("" if order_cols else " (no flow_seq — rerun preprocessing)")
+        )
         n = len(benign_sorted)
 
         test_frac = self.config.test_split
@@ -472,7 +509,7 @@ class DeepAutoencoder:
         atk_meta_cols = [
             c for c in SEQUENCE_META_COLUMNS if c in self.attack_data.columns
         ]
-        atk_cols = available_features + atk_meta_cols + ["Label"]
+        atk_cols = available_features + atk_meta_cols + order_cols + ["Label"]
         attack_all = self.attack_data[
             [c for c in atk_cols if c in self.attack_data.columns]
         ].copy()
@@ -805,29 +842,69 @@ class DeepAutoencoder:
         self.log.info(f"Training completed: {trainer.current_epoch + 1} epochs")
         self.log.info(f"Best validation loss: {callbacks[2].best_model_score:.6f}")
 
+    def _select_full_test_windows(self) -> None:
+        # Restrict evaluation to full windows (live inference never scores
+        # padded ones) and align test_labels* to them. Flows of src_ips with
+        # fewer than window_size flows are never scored live — a blind spot
+        # reported here per attack class.
+        if self.test_eval_rows is not None:
+            return
+        W = self.config.window_size
+        full = _window_fill(self.test_df, W) >= W
+        self.test_eval_rows = np.flatnonzero(full)
+
+        labels_orig = self.test_labels_orig.reset_index(drop=True)
+        lines = [
+            f"\nTest windows: {int(full.sum()):,}/{len(full):,} full "
+            f"(padded windows skipped, as in live inference):",
+            f"  {'Label':<35} {'Full':>10} {'Skipped':>10} {'Skipped %':>10}",
+        ]
+        for label in sorted(labels_orig.unique()):
+            m = (labels_orig == label).values
+            n_full, n_all = int((m & full).sum()), int(m.sum())
+            lines.append(
+                f"  {label:<35} {n_full:>10,} {n_all - n_full:>10,} "
+                f"{(n_all - n_full) / n_all:>10.2%}"
+            )
+        self.log.info("\n".join(lines))
+
+        self.test_labels = self.test_labels.iloc[self.test_eval_rows].reset_index(
+            drop=True
+        )
+        self.test_labels_orig = labels_orig.iloc[self.test_eval_rows].reset_index(
+            drop=True
+        )
+
     def predict_autoencoder(self) -> None:
         self.log.info(
             "Calculating LSTM AE anomaly scores on test set "
             f"({len(self.test_df):,} flows)..."
         )
 
+        W = self.config.window_size
+        val_rows = np.flatnonzero(_window_fill(self.benign_val, W) >= W)
+        self.log.info(
+            f"Val windows: {len(val_rows):,}/{len(self.benign_val):,} full "
+            f"(padded windows skipped, as in live inference)"
+        )
         val_seqs = _make_per_flow_sequences(
-            self.benign_val,
-            self.benign_val_scaled,
-            self.config.window_size,
+            self.benign_val, self.benign_val_scaled, W, rows=val_rows
         )
         val_scores = self._ae_predict_mse(val_seqs)
         self.log.info(
             f"Validation scores — mean={val_scores.mean():.6f}, std={val_scores.std():.6f}"
         )
 
+        self._select_full_test_windows()
         per_flow_seqs = _make_per_flow_sequences(
             self.test_df,
             self.test_features_scaled,
             self.config.window_size,
+            rows=self.test_eval_rows,
         )
 
         self.ae_mse_scores = self._ae_predict_mse(per_flow_seqs)
+        del per_flow_seqs
 
         ae_mse_benign = self.ae_mse_scores[self.test_labels == 0]
         ae_mse_attack = self.ae_mse_scores[self.test_labels == 1]
@@ -946,6 +1023,7 @@ class DeepAutoencoder:
                     self.test_df,
                     tail.astype(np.float32)[:, None],
                     self.config.window_size,
+                    rows=self.test_eval_rows,
                 )
                 .max(axis=(1, 2))
                 .astype(bool)
@@ -1048,7 +1126,8 @@ class DeepAutoencoder:
         name = self.config.analysis_threshold
         threshold = self.ae_threshold[name]
         cols = list(self._feature_cols)
-        benign_rows = np.flatnonzero((self.test_labels == 0).values)
+        self._select_full_test_windows()
+        benign_rows = self.test_eval_rows[(self.test_labels == 0).values]
 
         self.log.info(
             f"Per-feature error analysis on {len(benign_rows):,} benign test "
@@ -1253,7 +1332,7 @@ class DeepAutoencoder:
         attack_mask = self.test_labels.values == 1
 
         output = pd.DataFrame(
-            self.test_df[self._feature_cols].values[attack_mask],
+            self.test_df[self._feature_cols].values[self.test_eval_rows][attack_mask],
             columns=self._feature_cols,
         )
         output["ae_anomaly_score"] = self.ae_mse_scores[attack_mask]
@@ -1460,18 +1539,18 @@ class DeepAutoencoder:
         self.lightning_module.to(self.device)
 
         # Use per-flow sequences so each sample has a latent vector
+        total = len(self.test_eval_rows)
+        n_samples = min(n_samples, total)
+        rng = np.random.default_rng(42)
+        idx = rng.choice(total, n_samples, replace=False)
         per_flow_seqs = _make_per_flow_sequences(
             self.test_df,
             self.test_features_scaled,
             self.config.window_size,
+            rows=self.test_eval_rows[idx],
         )
 
-        total = len(per_flow_seqs)
-        n_samples = min(n_samples, total)
-        rng = np.random.default_rng(42)
-        idx = rng.choice(total, n_samples, replace=False)
-
-        x_sample = torch.FloatTensor(per_flow_seqs[idx]).to(self.device)
+        x_sample = torch.FloatTensor(per_flow_seqs).to(self.device)
         labels_sample = self.test_labels_orig.iloc[idx].values
 
         with torch.no_grad():

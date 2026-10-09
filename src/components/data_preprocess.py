@@ -7,6 +7,7 @@ import pandas as pd
 import ujson
 
 from model import (
+    FLOW_ORDER_COLUMN,
     SEQUENCE_META_COLUMNS,
     UNIFIED_FEATURE_NAMES,
     DataPreprocessingError,
@@ -152,6 +153,10 @@ class DataPreprocess:
                         low_memory=False,
                     )
                 df.columns = df.columns.str.strip()
+                # Row order within a file is drain order; kept so
+                # feature_preparation can rebuild FLOW_ORDER_COLUMN.
+                df["_file_key"] = str(csv_path)
+                df["_file_row"] = np.arange(len(df), dtype=np.int64)
                 frames.append(df)
                 self.log.info(f"{csv_path.name} Shape: {df.shape}")
             except Exception as e:
@@ -285,12 +290,24 @@ class DataPreprocess:
             else:
                 self.feature_matrix[meta_col] = self.combined_data[meta_col].values
 
+        if (
+            "_file_key" in self.combined_data.columns
+            and "timestamp" in self.feature_matrix.columns
+        ):
+            self.feature_matrix[FLOW_ORDER_COLUMN] = self._drain_order(
+                self.combined_data["_file_key"],
+                self.combined_data["_file_row"],
+                self.feature_matrix["timestamp"],
+            )
+
         n_feature_cols = len(UNIFIED_FEATURE_NAMES)
         n_total = self.feature_matrix[UNIFIED_FEATURE_NAMES].size
         n_nan = self.feature_matrix[UNIFIED_FEATURE_NAMES].isna().sum().sum()
         pct_nan = n_nan / n_total * 100 if n_total > 0 else 0
         meta_present = [
-            c for c in SEQUENCE_META_COLUMNS if c in self.feature_matrix.columns
+            c
+            for c in SEQUENCE_META_COLUMNS + [FLOW_ORDER_COLUMN]
+            if c in self.feature_matrix.columns
         ]
         self.log.info(
             f"Feature matrix: {self.feature_matrix.shape} "
@@ -299,6 +316,54 @@ class DataPreprocess:
         )
         if meta_present:
             self.log.info(f"Sequence metadata preserved: {meta_present}")
+
+    def _drain_order(
+        self, file_key: pd.Series, file_row: pd.Series, timestamp: pd.Series
+    ) -> np.ndarray:
+        # Global drain order: row order within each file (Mantis writes a
+        # row per drained flow), files ordered by their median flow start
+        # time — not by file name, which may not sort chronologically.
+        df = pd.DataFrame(
+            {
+                "file": file_key.values,
+                "row": file_row.values,
+                "ts": timestamp.where(timestamp >= 0).values,
+            }
+        )
+        stats = df.groupby("file", sort=False)["ts"].quantile([0.25, 0.5, 0.75])
+        stats = stats.unstack()
+        stats.columns = ["p25", "p50", "p75"]
+        stats["n"] = df.groupby("file", sort=False).size()
+        stats = stats.sort_values("p50", na_position="last", kind="stable")
+
+        # Files written one after another barely overlap (only long flows
+        # straddle a rotation); bulk overlap means concurrent writers, whose
+        # rows cannot be merged into one drain order by row position.
+        overlapping = [
+            (a, b)
+            for a, b in zip(stats.index[:-1], stats.index[1:])
+            if stats.at[a, "p75"] > stats.at[b, "p25"]
+        ]
+        if overlapping:
+            self.log.warning(
+                f"{len(overlapping)} pair(s) of CSV files overlap in time "
+                "(written concurrently?); flow_seq order across them is "
+                "unreliable:\n"
+                + "\n".join(
+                    f"  {Path(a).name} <-> {Path(b).name}" for a, b in overlapping
+                )
+            )
+
+        offsets = pd.Series(
+            np.concatenate([[0], np.cumsum(stats["n"].values[:-1])]),
+            index=stats.index,
+        )
+        self.log.info(
+            f"Drain order (flow_seq) built from {len(stats)} file(s), "
+            f"ordered by median timestamp: "
+            f"{[Path(f).name for f in stats.index]}"
+        )
+        return (df["file"].map(offsets).values + df["row"].values).astype(np.int64)
 
     def output_result(self) -> None:
         if self.feature_matrix is None or self.labels is None:
