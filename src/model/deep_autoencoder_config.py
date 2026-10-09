@@ -43,6 +43,10 @@ class DeepAutoencoderConfig:
     epochs: int = 1000
     validation_split: float = 0.10
     early_stopping_patience: int = 5
+    # Minimum val_loss drop that counts as an improvement for early stopping.
+    # Must be meaningful against the loss scale (~5e-3): at 1e-6, ~1e-5-sized
+    # gains at lr ~1e-5 kept resetting patience for 400+ epochs.
+    early_stopping_min_delta: float = 1e-5
     reduce_lr_patience: int = 3
     reduce_lr_factor: float = 0.5
     min_lr: float = 1e-7

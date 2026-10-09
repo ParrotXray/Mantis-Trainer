@@ -753,7 +753,7 @@ class DeepAutoencoder:
             EarlyStopping(
                 monitor="val_loss",
                 patience=self.config.early_stopping_patience,
-                min_delta=1e-6,
+                min_delta=self.config.early_stopping_min_delta,
                 mode="min",
                 verbose=True,
             ),
