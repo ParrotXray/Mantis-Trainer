@@ -40,6 +40,7 @@ Examples:
   python main.py -s xxx/xxx-dataset -dp     # Preprocess only
   python main.py -da                        # Train LSTM Autoencoder
   python main.py -ep                        # Export to ONNX
+  python main.py -fa                        # Feature error analysis of trained model
 
 Available datasets: {', '.join(available)}
         """,
@@ -73,6 +74,14 @@ Available datasets: {', '.join(available)}
     )
 
     parser.add_argument(
+        "-fa",
+        "--feature-analysis",
+        action="store_true",
+        help="Per-feature error analysis of the trained model in artifacts/ "
+        "(no retraining)",
+    )
+
+    parser.add_argument(
         "--resume",
         default=None,
         help="Resume training from checkpoint (e.g. ./artifacts/autoencoder_temp-v14.ckpt)",
@@ -86,6 +95,7 @@ Available datasets: {', '.join(available)}
             args.datapreprocess,
             args.deepautoencoder,
             args.export,
+            args.feature_analysis,
         ]
     ):
         parser.print_help()
@@ -138,6 +148,7 @@ Available datasets: {', '.join(available)}
                 da.build_autoencoder()
                 da.train_autoencoder(resume_ckpt=args.resume)
                 da.predict_autoencoder()
+                da.analyze_feature_errors()
                 da.bootstrap_metrics()
                 da.save_results()
                 da.generate_visualizations()
@@ -145,6 +156,23 @@ Available datasets: {', '.join(available)}
         deep_autoencoder_end = time.perf_counter()
         log.info(
             f"LSTM Deep Autoencoder execution time: {timedelta(seconds=(deep_autoencoder_end - deep_autoencoder_start))}"
+        )
+
+    if args.feature_analysis:
+        feature_analysis_start = time.perf_counter()
+
+        with pipeline_stage("Feature Error Analysis"):
+            with DeepAutoencoder() as da:
+                da.check_environment()
+                da.load_data()
+                da.prepare_data()
+                da.preprocess_data()
+                da.load_trained_model()
+                da.analyze_feature_errors()
+
+        feature_analysis_end = time.perf_counter()
+        log.info(
+            f"Feature error analysis execution time: {timedelta(seconds=(feature_analysis_end - feature_analysis_start))}"
         )
 
     if args.all or args.export:

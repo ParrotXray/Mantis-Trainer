@@ -22,6 +22,10 @@ class DeepAutoencoderConfig:
     # max_bound_z so a max_bound_z=None baseline checks the same features.
     tail_check_z: float = 4.0
 
+    # Val threshold (key of ae_thresholds) used by analyze_feature_errors to
+    # split benign test windows into false positives vs true negatives.
+    analysis_threshold: str = "p99"
+
     fill_value: float = 0.0
 
     window_size: int = 15

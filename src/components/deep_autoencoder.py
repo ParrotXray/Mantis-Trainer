@@ -303,10 +303,20 @@ def _make_per_flow_sequences(
     df: pd.DataFrame,
     scaled: np.ndarray,
     window_size: int,
+    rows: Optional[np.ndarray] = None,
 ) -> np.ndarray:
+    # rows: build only the windows ending at these flow positions (in this
+    # order) — windows still draw on every flow of the same src_ip.
     n_flows = len(scaled)
     n_features = scaled.shape[1]
-    sequences = np.zeros((n_flows, window_size, n_features), dtype=np.float32)
+    if rows is None:
+        out_idx = np.arange(n_flows)
+        n_out = n_flows
+    else:
+        out_idx = np.full(n_flows, -1)
+        out_idx[rows] = np.arange(len(rows))
+        n_out = len(rows)
+    sequences = np.zeros((n_out, window_size, n_features), dtype=np.float32)
 
     has_meta = all(c in df.columns for c in SEQUENCE_META_COLUMNS)
 
@@ -317,15 +327,19 @@ def _make_per_flow_sequences(
             group_sorted = group.sort_values("timestamp")
             positions = group_sorted["_pos"].values
             for k, pos in enumerate(positions):
+                if out_idx[pos] < 0:
+                    continue
                 start_in_group = max(0, k + 1 - window_size)
                 window_pos = positions[start_in_group : k + 1]
                 pad_len = window_size - len(window_pos)
-                sequences[pos, pad_len:] = scaled[window_pos]
+                sequences[out_idx[pos], pad_len:] = scaled[window_pos]
     else:
         for i in range(n_flows):
+            if out_idx[i] < 0:
+                continue
             start = max(0, i + 1 - window_size)
             pad_len = window_size - (i + 1 - start)
-            sequences[i, pad_len:] = scaled[start : i + 1]
+            sequences[out_idx[i], pad_len:] = scaled[start : i + 1]
 
     return sequences
 
@@ -968,6 +982,199 @@ class DeepAutoencoder:
                     f"{f'{fpr_without:.2%}':<12} {ratio:<8.2f}"
                 )
             self.log.info("\n".join(lines))
+
+    def load_trained_model(self) -> None:
+        # Loads artifacts/ from a previous training run so the analysis below
+        # can run without retraining. Call after preprocess_data(): the refit
+        # scaler must match the saved one, or the model would see different
+        # inputs than it was trained on (e.g. the parquet changed since).
+        ckpt = torch.load(
+            Path("artifacts") / "deep_autoencoder.pt",
+            map_location="cpu",
+            weights_only=False,
+        )
+        self.autoencoder_model = LSTMAutoencoderModel(
+            input_dim=ckpt["input_dim"],
+            hidden_size=ckpt["hidden_size"],
+            num_layers=ckpt["num_layers"],
+            encoding_dim=ckpt["encoding_dim"],
+            dropout=ckpt.get("dropout", 0.0),
+        )
+        self.autoencoder_model.load_state_dict(ckpt["model_state_dict"])
+        self.lightning_module = LSTMAutoencoderLightningModule(
+            model=self.autoencoder_model
+        )
+
+        saved = joblib.load(Path("artifacts") / "deep_ae_config.pkl")
+        saved_scaler = saved["scaler"]
+        if list(saved["feature_names"]) != list(self._feature_cols) or not (
+            np.allclose(saved_scaler.mean_, self.scaler.mean_)
+            and np.allclose(saved_scaler.scale_, self.scaler.scale_)
+        ):
+            raise TrainingError(
+                "Preprocessing does not match artifacts/deep_ae_config.pkl "
+                "(different data or preprocessing code since training); "
+                "the saved model cannot be analysed on this data."
+            )
+        self.ae_threshold = saved["ae_thresholds"]
+        self.log.info(
+            f"Loaded trained model from artifacts/ "
+            f"(thresholds={list(self.ae_threshold)})"
+        )
+
+    def _ae_predict_feature_err(self, sequences: np.ndarray) -> np.ndarray:
+        # Squared error averaged over timesteps, shape (n, F); its mean over
+        # features is exactly the anomaly score from _ae_predict_mse.
+        self.lightning_module.eval()
+        self.lightning_module.to(self.device)
+
+        n, _, n_features = sequences.shape
+        feat_err = np.zeros((n, n_features), dtype=np.float32)
+
+        with torch.no_grad():
+            for start in range(0, n, self.config.inference_batch_size):
+                end = min(start + self.config.inference_batch_size, n)
+                batch = torch.FloatTensor(sequences[start:end]).to(self.device)
+                recon = self.lightning_module(batch).cpu().numpy()
+                feat_err[start:end] = np.mean(
+                    np.square(sequences[start:end] - recon), axis=1
+                )
+
+        return feat_err
+
+    def analyze_feature_errors(self) -> None:
+        # Which features push benign test windows over the val threshold
+        # (false positives), and which src_ips those windows come from.
+        name = self.config.analysis_threshold
+        threshold = self.ae_threshold[name]
+        cols = list(self._feature_cols)
+        benign_rows = np.flatnonzero((self.test_labels == 0).values)
+
+        self.log.info(
+            f"Per-feature error analysis on {len(benign_rows):,} benign test "
+            f"windows @ val threshold {name}={threshold:.6f}..."
+        )
+        seqs = _make_per_flow_sequences(
+            self.test_df,
+            self.test_features_scaled,
+            self.config.window_size,
+            rows=benign_rows,
+        )
+        feat_err = self._ae_predict_feature_err(seqs)
+        del seqs
+        scores = feat_err.mean(axis=1)
+        fp = scores > threshold
+
+        lines = [
+            "\nBenign FPR on test set @ val thresholds (what deployment sees):",
+            f"{'Name':<14} {'Threshold':<14} {'Val FPR':<10} {'Test FPR':<10}",
+            "-" * 50,
+        ]
+        val_fpr = {f"p{p}": (100 - p) / 100 for p in range(90, 100)}
+        for n_, t in self.ae_threshold.items():
+            vf = f"{val_fpr[n_]:.2%}" if n_ in val_fpr else "-"
+            lines.append(
+                f"{n_:<14} {t:<14.6f} {vf:<10} {f'{(scores > t).mean():.2%}':<10}"
+            )
+        self.log.info("\n".join(lines))
+
+        n_fp = int(fp.sum())
+        if n_fp == 0 or n_fp == len(fp):
+            self.log.info(f"No split at {name}: {n_fp:,} false positives")
+            return
+
+        self._log_feature_error_table(
+            f"Feature error: {n_fp:,} false-positive vs {len(fp) - n_fp:,} "
+            f"true-negative benign windows @ {name}",
+            cols,
+            feat_err[fp],
+            feat_err[~fp],
+        )
+
+        # Within FP windows holding a tail value of a tail feature: is that
+        # feature's own error what pushes them over, or other features?
+        for col, tail in self.tail_test_masks.items():
+            in_window = (
+                _make_per_flow_sequences(
+                    self.test_df,
+                    tail.astype(np.float32)[:, None],
+                    self.config.window_size,
+                    rows=benign_rows,
+                )
+                .max(axis=(1, 2))
+                .astype(bool)
+            )
+            fp_tail = fp & in_window
+            if fp_tail.sum() == 0:
+                continue
+            self._log_feature_error_table(
+                f"Feature error: {int(fp_tail.sum()):,} false-positive windows "
+                f"with {col} tail vs {int((~fp & in_window).sum()):,} "
+                f"true-negative windows with {col} tail @ {name}",
+                cols,
+                feat_err[fp_tail],
+                feat_err[~fp & in_window],
+                highlight=col,
+            )
+
+        if "src_ip" in self.test_df.columns:
+            ips = self.test_df["src_ip"].values[benign_rows]
+            by_ip = (
+                pd.DataFrame({"src_ip": ips, "fp": fp})
+                .groupby("src_ip")["fp"]
+                .agg(["size", "sum"])
+                .sort_values("sum", ascending=False)
+            )
+            lines = [
+                f"\nFalse positives by src_ip @ {name} "
+                f"({len(by_ip):,} benign src_ips, top 15 by FP count):",
+                f"  {'src_ip':<40} {'Windows':>9} {'FP':>9} {'FP rate':>9} {'% of FP':>9}",
+            ]
+            for ip, row in by_ip.head(15).iterrows():
+                lines.append(
+                    f"  {str(ip):<40} {int(row['size']):>9,} {int(row['sum']):>9,} "
+                    f"{row['sum'] / row['size']:>9.2%} {row['sum'] / n_fp:>9.2%}"
+                )
+            self.log.info("\n".join(lines))
+
+    def _log_feature_error_table(
+        self,
+        title: str,
+        cols: List[str],
+        err_a: np.ndarray,
+        err_b: np.ndarray,
+        highlight: Optional[str] = None,
+        top: int = 15,
+    ) -> None:
+        # Share = feature's part of group A's total error; Gap share = its part
+        # of how much higher group A's error is than group B's — the features
+        # that actually push A over the threshold.
+        mean_a = err_a.mean(axis=0)
+        mean_b = err_b.mean(axis=0) if len(err_b) else np.zeros_like(mean_a)
+        gap = mean_a - mean_b
+        share = mean_a / mean_a.sum()
+        gap_share = gap / gap.sum() if gap.sum() > 0 else np.zeros_like(gap)
+        order = np.argsort(-gap)
+
+        lines = [
+            f"\n{title} (top {top} by error gap):",
+            f"  {'Rank':<5} {'Feature':<22} {'Err A':>10} {'Err B':>10} "
+            f"{'Ratio':>8} {'Share A':>8} {'Gap share':>10}",
+        ]
+        for rank, i in enumerate(order[:top], start=1):
+            ratio = mean_a[i] / mean_b[i] if mean_b[i] > 0 else float("nan")
+            lines.append(
+                f"  {rank:<5} {cols[i]:<22} {mean_a[i]:>10.5f} {mean_b[i]:>10.5f} "
+                f"{ratio:>8.1f} {share[i]:>8.1%} {gap_share[i]:>10.1%}"
+            )
+        if highlight is not None and highlight in cols:
+            i = cols.index(highlight)
+            rank = int(np.flatnonzero(order == i)[0]) + 1
+            lines.append(
+                f"  -> {highlight}: rank {rank}/{len(cols)}, "
+                f"share A {share[i]:.1%}, gap share {gap_share[i]:.1%}"
+            )
+        self.log.info("\n".join(lines))
 
     def bootstrap_metrics(
         self,
