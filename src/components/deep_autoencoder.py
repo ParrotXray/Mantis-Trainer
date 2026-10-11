@@ -258,6 +258,14 @@ def _fmt_utc(ms: float) -> str:
     return pd.to_datetime(int(ms), unit="ms", utc=True).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _rate(mask: np.ndarray) -> float:
+    return float(mask.mean()) if len(mask) else float("nan")
+
+
+def _pct(x: float) -> str:
+    return "n/a" if np.isnan(x) else f"{x:.2%}"
+
+
 def _order_column(df: pd.DataFrame) -> str:
     # Windows follow drain order (what live inference buffers per src_ip);
     # parquet built before flow_seq existed falls back to flow start time.
@@ -1106,6 +1114,8 @@ class DeepAutoencoder:
                 )
 
         def _scale(feat: pd.DataFrame) -> np.ndarray:
+            if len(feat) == 0:  # e.g. no old data to replay
+                return np.zeros((0, len(self._feature_cols)))
             return self.scaler.transform(feat)
 
         self.benign_train_scaled_raw = _scale(train_feat)
@@ -1156,13 +1166,13 @@ class DeepAutoencoder:
         )
         self.finetune_before = {
             "threshold": threshold,
-            "new": float((new_scores > threshold).mean()) if len(new_scores) else 0.0,
-            "old": float((old_scores > threshold).mean()) if len(old_scores) else 0.0,
+            "new": _rate(new_scores > threshold),
+            "old": _rate(old_scores > threshold),
         }
         self.log.info(
             f"Pretrained model @ {name}={threshold:.6f}: benign FPR "
-            f"new test {self.finetune_before['new']:.2%}, "
-            f"old test {self.finetune_before['old']:.2%}"
+            f"new test {_pct(self.finetune_before['new'])}, "
+            f"old test {_pct(self.finetune_before['old'])}"
         )
 
     def finetune_report(self) -> None:
@@ -1174,24 +1184,30 @@ class DeepAutoencoder:
         old_scores = self._score_benign_full_windows(
             self.benign_old_test, self.benign_old_test_scaled
         )
-        after_new = float((new_scores > threshold).mean()) if len(new_scores) else 0.0
-        after_old = float((old_scores > threshold).mean()) if len(old_scores) else 0.0
+        after_new = _rate(new_scores > threshold)
+        after_old = _rate(old_scores > threshold)
         before = self.finetune_before or {}
+        nan = float("nan")
         self.log.info(
             "\n".join(
                 [
                     f"\nFinetune check — benign FPR @ {name} (full windows):",
                     f"  {'':<26} {'Pretrained':>11} {'Finetuned':>11}",
-                    f"  {'threshold':<26} {before.get('threshold', float('nan')):>11.6f} "
+                    f"  {'threshold':<26} {before.get('threshold', nan):>11.6f} "
                     f"{threshold:>11.6f}",
-                    f"  {'new test (learned?)':<26} {before.get('new', float('nan')):>11.2%} "
-                    f"{after_new:>11.2%}",
-                    f"  {'old test (forgotten?)':<26} {before.get('old', float('nan')):>11.2%} "
-                    f"{after_old:>11.2%}  (n={len(old_scores):,})",
+                    f"  {'new test (learned?)':<26} {_pct(before.get('new', nan)):>11} "
+                    f"{_pct(after_new):>11}",
+                    f"  {'old test (forgotten?)':<26} {_pct(before.get('old', nan)):>11} "
+                    f"{_pct(after_old):>11}  (n={len(old_scores):,})",
                 ]
             )
         )
-        if before and after_old > max(2 * before["old"], before["old"] + 0.01):
+        if len(old_scores) == 0:
+            self.log.warning(
+                "No old test period: forgetting of old traffic was NOT checked "
+                "(preprocess the old dataset together with the new one)"
+            )
+        elif before and after_old > max(2 * before["old"], before["old"] + 0.01):
             self.log.warning(
                 "Old-traffic FPR rose after finetuning (forgetting): raise "
                 "finetune_replay_ratio or retrain from scratch"
