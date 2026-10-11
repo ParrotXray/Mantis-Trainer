@@ -42,7 +42,7 @@ Examples:
   python main.py -ep                        # Export to ONNX
   python main.py -fa                        # Feature error analysis of trained model
   python main.py --finetune                 # Finetune ./artifacts model on newer data
-  python main.py --finetune ./old_model --finetune-since 2026-10-03
+  python main.py --finetune ./old_model       # Finetune a model from another dir
 
 Available datasets: {', '.join(available)}
         """,
@@ -90,17 +90,8 @@ Available datasets: {', '.join(available)}
         default=None,
         metavar="MODEL_DIR",
         help="Finetune a finished model (dir with deep_autoencoder.pt and "
-        "deep_ae_config.pkl, default ./artifacts) on newer data, reusing its "
-        "preprocessing and structure; ./artifacts is backed up first",
-    )
-    parser.add_argument(
-        "--finetune-since",
-        default=None,
-        metavar="DATE",
-        help="Optional UTC date/time where the new data starts (e.g. "
-        "2026-10-03); earlier flows are replayed against forgetting. Default: "
-        "the end of the pretrained model's training data if recorded, else "
-        "all loaded data is new",
+        "deep_ae_config.pkl, default ./artifacts) on the loaded (new) data, "
+        "reusing its preprocessing and structure; ./artifacts is backed up first",
     )
 
     parser.add_argument(
@@ -191,7 +182,7 @@ Available datasets: {', '.join(available)}
             with DeepAutoencoder() as da:
                 da.check_environment()
                 da.load_data()
-                da.load_pretrained(args.finetune, since=args.finetune_since)
+                da.load_pretrained(args.finetune)
                 da.prepare_data()
                 da.preprocess_data()
                 da.build_sequences()

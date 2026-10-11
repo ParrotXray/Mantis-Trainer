@@ -22,7 +22,6 @@ if [ "$FINETUNE" = "true" ]; then
 elif [ -n "$FINETUNE" ] && [ "$FINETUNE" != "false" ]; then
     CMD="$CMD --finetune $FINETUNE"
 fi
-[ -n "$FINETUNE_SINCE" ] && CMD="$CMD --finetune-since $FINETUNE_SINCE"
 [ -n "$RESUME" ] && CMD="$CMD --resume $RESUME"
 
 exec $CMD "$@"
