@@ -1,4 +1,5 @@
 import os
+import shutil
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -253,6 +254,10 @@ class LSTMAutoencoderLightningModule(L.LightningModule):
         }
 
 
+def _fmt_utc(ms: float) -> str:
+    return pd.to_datetime(int(ms), unit="ms", utc=True).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def _order_column(df: pd.DataFrame) -> str:
     # Windows follow drain order (what live inference buffers per src_ip);
     # parquet built before flow_seq existed falls back to flow start time.
@@ -415,6 +420,18 @@ class DeepAutoencoder:
         self.autoencoder_model: Optional[LSTMAutoencoderModel] = None
         self.lightning_module: Optional[LSTMAutoencoderLightningModule] = None
 
+        # Finetune (load_pretrained): source model, where new data starts,
+        # replayed old train flows and the held-out old test period.
+        self.pretrained: Optional[Dict] = None
+        self.pretrained_source: Optional[str] = None
+        self.finetune_since_ms: Optional[int] = None
+        self.benign_replay: Optional[pd.DataFrame] = None
+        self.benign_old_test: Optional[pd.DataFrame] = None
+        self.benign_replay_scaled: Optional[np.ndarray] = None
+        self.benign_old_test_scaled: Optional[np.ndarray] = None
+        self.finetune_before: Optional[Dict[str, float]] = None
+        self.split_ranges: Dict[str, List[int]] = {}
+
         self.config: DeepAutoencoderConfig = config or DeepAutoencoderConfig()
         self.log: Logger = Logger(__name__)
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -494,22 +511,61 @@ class DeepAutoencoder:
             f"Window order: {_order_column(benign_sorted)}"
             + ("" if order_cols else " (no flow_seq — rerun preprocessing)")
         )
-        n = len(benign_sorted)
-
         test_frac = self.config.test_split
         val_frac = self.config.validation_split
-        train_end = int(n * (1 - test_frac - val_frac))
-        val_end = int(n * (1 - test_frac))
 
-        self.benign_train = benign_sorted.iloc[:train_end].reset_index(drop=True)
-        self.benign_val = benign_sorted.iloc[train_end:val_end].reset_index(drop=True)
-        benign_test = benign_sorted.iloc[val_end:].reset_index(drop=True)
+        if self.finetune_since_ms is None:
+            self.benign_train, self.benign_val, benign_test = self._split_by_time(
+                benign_sorted, val_frac, test_frac
+            )
+        else:
+            # Finetune: train/val/test come from the new data; earlier flows
+            # are split into replay (trained on) and an old test period that
+            # checks for forgetting.
+            is_new = (benign_sorted["timestamp"] >= self.finetune_since_ms).values
+            new, old = benign_sorted[is_new], benign_sorted[~is_new]
+            if len(new) == 0:
+                raise TrainingError(
+                    f"No benign flows from {_fmt_utc(self.finetune_since_ms)} UTC on; "
+                    "preprocess a dataset that includes the new data"
+                )
+            self.benign_train, self.benign_val, benign_test = self._split_by_time(
+                new, val_frac, test_frac
+            )
+            self.benign_replay, _, self.benign_old_test = self._split_by_time(
+                old, 0.0, test_frac
+            )
+            self.log.info(
+                f"Finetune split — new flows: {len(new):,} "
+                f"(train={len(self.benign_train):,} / val={len(self.benign_val):,} "
+                f"/ test={len(benign_test):,}); old flows: {len(old):,} "
+                f"(replay pool={len(self.benign_replay):,} / "
+                f"old test={len(self.benign_old_test):,})"
+            )
+            if len(old) == 0:
+                self.log.warning(
+                    "No flows before the new data: nothing to replay or to check "
+                    "forgetting against — preprocess the old and new datasets together"
+                )
+            if len(self.benign_train) == 0 or len(self.benign_val) == 0:
+                raise TrainingError("Too little new data for a train/val split")
 
+        for split, df in [
+            ("train", self.benign_train),
+            ("val", self.benign_val),
+            ("test", benign_test),
+        ]:
+            if len(df):
+                self.split_ranges[split] = [
+                    int(df["timestamp"].min()),
+                    int(df["timestamp"].max()),
+                ]
         self.log.info(
-            f"Time-based split boundaries — "
-            f"train ends: {datetime.fromtimestamp(benign_sorted['timestamp'].iloc[train_end - 1] / 1000).strftime('%Y-%m-%d %H:%M:%S')}, "
-            f"val ends: {datetime.fromtimestamp(benign_sorted['timestamp'].iloc[val_end - 1] / 1000).strftime('%Y-%m-%d %H:%M:%S')}, "
-            f"test ends: {datetime.fromtimestamp(benign_sorted['timestamp'].iloc[-1] / 1000).strftime('%Y-%m-%d %H:%M:%S')}"
+            "Time-based split (UTC) — "
+            + ", ".join(
+                f"{k}: {_fmt_utc(a)} .. {_fmt_utc(b)}"
+                for k, (a, b) in self.split_ranges.items()
+            )
         )
 
         atk_meta_cols = [
@@ -551,6 +607,9 @@ class DeepAutoencoder:
 
     def preprocess_data(self) -> None:
         self.log.info("Preprocessing data (scale flow features only)...")
+        if self.pretrained is not None:
+            self._preprocess_frozen()
+            return
 
         def _feat(df: pd.DataFrame) -> pd.DataFrame:
             return df[self._feature_cols].copy()
@@ -708,6 +767,22 @@ class DeepAutoencoder:
                 f"(ratio={self.config.synthetic_augmentation_ratio})"
             )
 
+        if self.benign_replay is not None and len(self.benign_replay):
+            replay = _make_train_sequences(
+                self.benign_replay, self.benign_replay_scaled, W, S
+            )
+            n_keep = int(len(replay) * self.config.finetune_replay_ratio)
+            rng = np.random.default_rng(self.config.split_random_state)
+            keep = rng.choice(len(replay), size=n_keep, replace=False)
+            self.train_sequences = np.concatenate(
+                [self.train_sequences, replay[keep]], axis=0
+            )
+            self.log.info(
+                f"Added {n_keep:,}/{len(replay):,} replayed old-data sequences "
+                f"(finetune_replay_ratio={self.config.finetune_replay_ratio})"
+            )
+            del replay
+
         self.val_sequences = _make_train_sequences(
             self.benign_val, self.benign_val_scaled, W, S
         )
@@ -729,6 +804,9 @@ class DeepAutoencoder:
 
     def build_autoencoder(self) -> None:
         self.log.info("Building LSTM Deep Autoencoder...")
+        if self.pretrained is not None:
+            self._build_from_pretrained()
+            return
 
         input_dim = len(self._feature_cols)
 
@@ -761,6 +839,35 @@ class DeepAutoencoder:
 
         total_params = sum(p.numel() for p in self.autoencoder_model.parameters())
         self.log.info(f"Total parameters: {total_params:,}")
+
+    def _build_from_pretrained(self) -> None:
+        # Structure and weights from the pretrained checkpoint; lr scaled
+        # down so finetuning adjusts rather than overwrites what it learned.
+        ckpt = self.pretrained["checkpoint"]
+        self.autoencoder_model = LSTMAutoencoderModel(
+            input_dim=ckpt["input_dim"],
+            hidden_size=ckpt["hidden_size"],
+            num_layers=ckpt["num_layers"],
+            encoding_dim=ckpt["encoding_dim"],
+            dropout=ckpt.get("dropout", self.config.dropout),
+        )
+        self.autoencoder_model.load_state_dict(ckpt["model_state_dict"])
+        lr = self.config.learning_rate * self.config.finetune_lr_scale
+        self.lightning_module = LSTMAutoencoderLightningModule(
+            model=self.autoencoder_model,
+            learning_rate=lr,
+            weight_decay=self.config.weight_decay,
+            clipnorm=self.config.clipnorm,
+            reduce_lr_factor=self.config.reduce_lr_factor,
+            reduce_lr_patience=self.config.reduce_lr_patience,
+            min_lr=self.config.min_lr,
+            latent_norm_weight=self.config.latent_norm_weight,
+        )
+        self.log.info(
+            f"Loaded pretrained weights: input_dim={ckpt['input_dim']}, "
+            f"hidden={ckpt['hidden_size']}, layers={ckpt['num_layers']}, "
+            f"bottleneck={ckpt['encoding_dim']}; lr={lr:.2e}"
+        )
 
     def train_autoencoder(self, resume_ckpt: Optional[Path] = None) -> None:
         self.log.info("Training LSTM Deep Autoencoder with PyTorch Lightning...")
@@ -850,6 +957,245 @@ class DeepAutoencoder:
 
         self.log.info(f"Training completed: {trainer.current_epoch + 1} epochs")
         self.log.info(f"Best validation loss: {callbacks[2].best_model_score:.6f}")
+
+    def load_pretrained(
+        self,
+        model_dir: str = "./artifacts",
+        since: Optional[str] = None,
+        backup: bool = True,
+        since_ms: Optional[int] = None,
+    ) -> None:
+        # Finetune start point: weights, structure and frozen preprocessing
+        # (log1p set, winsorize bounds, scaler) of a finished model, so the
+        # exported preprocessing stays compatible. Flows from `since` on are
+        # the new data; earlier flows are replayed against forgetting.
+        src = Path(model_dir)
+        pt_path, pkl_path = src / "deep_autoencoder.pt", src / "deep_ae_config.pkl"
+        if not pt_path.exists() or not pkl_path.exists():
+            raise TrainingError(
+                f"Finetune needs {pt_path} and {pkl_path} from a finished model"
+            )
+
+        if backup and src.resolve() == Path("artifacts").resolve():
+            dest = Path("artifacts") / f"pretrained_{self.datestamp}"
+            dest.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(pt_path, dest / pt_path.name)
+            shutil.copy2(pkl_path, dest / pkl_path.name)
+            self.pretrained_source = str(dest)
+            self.log.info(f"Backed up pretrained model to {dest}/")
+        else:
+            self.pretrained_source = str(src)
+
+        cfg = joblib.load(pkl_path)
+        ckpt = torch.load(pt_path, map_location="cpu", weights_only=False)
+        self.pretrained = {"config": cfg, "checkpoint": ckpt}
+
+        if ckpt.get("window_size", self.config.window_size) != self.config.window_size:
+            self.log.warning(
+                f"window_size {self.config.window_size} -> {ckpt['window_size']} "
+                "(taken from the pretrained model)"
+            )
+            self.config.window_size = ckpt["window_size"]
+
+        lineage = cfg.get("lineage") or {}
+        if since_ms is not None:
+            self.finetune_since_ms = int(since_ms)
+        elif since is not None:
+            self.finetune_since_ms = int(pd.Timestamp(since).value // 1_000_000)
+        elif lineage.get("train_end_ms") is not None:
+            self.finetune_since_ms = int(lineage["train_end_ms"]) + 1
+        else:
+            raise TrainingError(
+                "The pretrained model does not record when its training data "
+                "ends; pass --finetune-since YYYY-MM-DD (UTC) to mark where the "
+                "new data starts."
+            )
+        self.log.info(
+            f"Finetuning from {self.pretrained_source} — new data from "
+            f"{_fmt_utc(self.finetune_since_ms)} UTC, lr x{self.config.finetune_lr_scale}, "
+            f"replay ratio {self.config.finetune_replay_ratio}"
+        )
+
+    def match_trained_split(self, model_dir: str = "./artifacts") -> None:
+        # For -fa on a finetuned model: rebuild its finetune split and frozen
+        # preprocessing so the analysis sees the data it was evaluated on.
+        lineage = (
+            joblib.load(Path(model_dir) / "deep_ae_config.pkl").get("lineage") or {}
+        )
+        if lineage.get("finetune_since_ms") is not None:
+            self.load_pretrained(
+                model_dir, backup=False, since_ms=lineage["finetune_since_ms"]
+            )
+
+    def _split_by_time(
+        self, df: pd.DataFrame, val_frac: float, test_frac: float
+    ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        n = len(df)
+        train_end = int(n * (1 - test_frac - val_frac))
+        val_end = int(n * (1 - test_frac))
+        return (
+            df.iloc[:train_end].reset_index(drop=True),
+            df.iloc[train_end:val_end].reset_index(drop=True),
+            df.iloc[val_end:].reset_index(drop=True),
+        )
+
+    def _transform_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        # Frozen preprocessing (finetune): clean -> log1p -> winsorize with
+        # the pretrained parameters; scaling is applied by the caller.
+        feat = df[self._feature_cols].replace([np.inf, -np.inf], np.nan)
+        feat = feat.fillna(self.config.fill_value)
+        for col in self.log_transform_features:
+            feat[col] = np.log1p(feat[col].clip(lower=0))
+        for col, p in self.clip_params.items():
+            feat[col] = np.clip(feat[col], p["lower"], p["upper"])
+        return feat
+
+    def _preprocess_frozen(self) -> None:
+        cfg = self.pretrained["config"]
+        if list(cfg["feature_names"]) != list(self._feature_cols):
+            raise TrainingError(
+                "Feature set differs from the pretrained model; retrain from scratch"
+            )
+        self.log_transform_features = list(cfg["log_transform_features"])
+        self.clip_params = cfg["clip_params"]
+        self.scaler = cfg["scaler"]
+        self.capped_features = list(cfg.get("capped_features") or [])
+        self.log.info(
+            "Preprocessing frozen from the pretrained model "
+            f"({len(self.log_transform_features)} log1p features, "
+            f"capped: {self.capped_features})"
+        )
+
+        # New values beyond the frozen winsorize bounds get clipped: a high
+        # share means the new traffic outgrew the old preprocessing.
+        raw = self.benign_train[self._feature_cols].replace([np.inf, -np.inf], np.nan)
+        raw = raw.fillna(self.config.fill_value)
+        for col in self.log_transform_features:
+            raw[col] = np.log1p(raw[col].clip(lower=0))
+        rows = []
+        for col, p in self.clip_params.items():
+            below = float((raw[col] < p["lower"]).mean())
+            above = float((raw[col] > p["upper"]).mean())
+            rows.append((col, below, above))
+        rows.sort(key=lambda r: -(r[1] + r[2]))
+        self.log.info(
+            "New train data outside the frozen winsorize bounds "
+            "(pretrained bounds keep ~0.5% per side; much more = outgrown):\n"
+            + "\n".join(
+                f"  {c:<22} below={b:7.2%}  above={a:7.2%}" for c, b, a in rows[:10]
+            )
+        )
+
+        train_feat = self._transform_features(self.benign_train)
+        test_feat = self._transform_features(self.test_df)
+
+        self.tail_test_masks = {}
+        for i, col in enumerate(self.scaler.feature_names_in_):
+            lo, hi = self.clip_params[col]["lower"], self.clip_params[col]["upper"]
+            mean, std = self.scaler.mean_[i], self.scaler.scale_[i]
+            z_lo, z_hi = (lo - mean) / std, (hi - mean) / std
+            if (
+                col in self.capped_features
+                or max(-z_lo, z_hi) > self.config.tail_check_z
+            ):
+                median = train_feat[col].median()
+                self.tail_test_masks[col] = (
+                    test_feat[col].values > median
+                    if z_hi >= -z_lo
+                    else test_feat[col].values < median
+                )
+
+        def _scale(feat: pd.DataFrame) -> np.ndarray:
+            return self.scaler.transform(feat)
+
+        self.benign_train_scaled_raw = _scale(train_feat)
+        self.benign_val_scaled_raw = _scale(self._transform_features(self.benign_val))
+        self.test_features_scaled_raw = _scale(test_feat)
+        self._check_feature_saturation()
+
+        def _clip(arr: np.ndarray) -> np.ndarray:
+            return np.clip(arr, self.config.clip_min, self.config.clip_max)
+
+        self.benign_train_scaled = _clip(self.benign_train_scaled_raw)
+        self.benign_val_scaled = _clip(self.benign_val_scaled_raw)
+        self.test_features_scaled = _clip(self.test_features_scaled_raw)
+        self.benign_replay_scaled = _clip(
+            _scale(self._transform_features(self.benign_replay))
+        )
+        self.benign_old_test_scaled = _clip(
+            _scale(self._transform_features(self.benign_old_test))
+        )
+        self.log.info("Preprocessing completed (frozen)")
+
+    def _score_benign_full_windows(
+        self, df: pd.DataFrame, scaled: np.ndarray
+    ) -> np.ndarray:
+        W = self.config.window_size
+        rows = np.flatnonzero(_window_fill(df, W) >= W)
+        if len(rows) == 0:
+            return np.zeros(0, dtype=np.float32)
+        return self._ae_predict_mse(_make_per_flow_sequences(df, scaled, W, rows=rows))
+
+    def finetune_baseline(self) -> None:
+        # Pretrained model (weights just loaded, not yet trained) on the new
+        # and old test periods at its own threshold — the "before" column.
+        name = self.config.analysis_threshold
+        threshold = self.pretrained["config"]["ae_thresholds"][name]
+        self._select_full_test_windows()
+        benign_rows = self.test_eval_rows[(self.test_labels == 0).values]
+        new_scores = self._ae_predict_mse(
+            _make_per_flow_sequences(
+                self.test_df,
+                self.test_features_scaled,
+                self.config.window_size,
+                rows=benign_rows,
+            )
+        )
+        old_scores = self._score_benign_full_windows(
+            self.benign_old_test, self.benign_old_test_scaled
+        )
+        self.finetune_before = {
+            "threshold": threshold,
+            "new": float((new_scores > threshold).mean()) if len(new_scores) else 0.0,
+            "old": float((old_scores > threshold).mean()) if len(old_scores) else 0.0,
+        }
+        self.log.info(
+            f"Pretrained model @ {name}={threshold:.6f}: benign FPR "
+            f"new test {self.finetune_before['new']:.2%}, "
+            f"old test {self.finetune_before['old']:.2%}"
+        )
+
+    def finetune_report(self) -> None:
+        # Before/after: did finetuning learn the new traffic (new test FPR
+        # down) without forgetting the old (old test FPR not up)?
+        name = self.config.analysis_threshold
+        threshold = self.ae_threshold[name]
+        new_scores = self.ae_mse_scores[(self.test_labels == 0).values]
+        old_scores = self._score_benign_full_windows(
+            self.benign_old_test, self.benign_old_test_scaled
+        )
+        after_new = float((new_scores > threshold).mean()) if len(new_scores) else 0.0
+        after_old = float((old_scores > threshold).mean()) if len(old_scores) else 0.0
+        before = self.finetune_before or {}
+        self.log.info(
+            "\n".join(
+                [
+                    f"\nFinetune check — benign FPR @ {name} (full windows):",
+                    f"  {'':<26} {'Pretrained':>11} {'Finetuned':>11}",
+                    f"  {'threshold':<26} {before.get('threshold', float('nan')):>11.6f} "
+                    f"{threshold:>11.6f}",
+                    f"  {'new test (learned?)':<26} {before.get('new', float('nan')):>11.2%} "
+                    f"{after_new:>11.2%}",
+                    f"  {'old test (forgotten?)':<26} {before.get('old', float('nan')):>11.2%} "
+                    f"{after_old:>11.2%}  (n={len(old_scores):,})",
+                ]
+            )
+        )
+        if before and after_old > max(2 * before["old"], before["old"] + 0.01):
+            self.log.warning(
+                "Old-traffic FPR rose after finetuning (forgetting): raise "
+                "finetune_replay_ratio or retrain from scratch"
+            )
 
     def _select_full_test_windows(self) -> None:
         # Restrict evaluation to full windows (live inference never scores
@@ -1550,6 +1896,22 @@ class DeepAutoencoder:
             "ae_thresholds": self.ae_threshold,
             "log_transform_features": self.log_transform_features,
             "capped_features": self.capped_features,
+            # train_end_ms lets the next --finetune find where new data starts.
+            "lineage": {
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "train_end_ms": self.split_ranges.get("train", [None, None])[1],
+                "split_ranges_ms": self.split_ranges,
+                "finetuned_from": self.pretrained_source,
+                "finetune_since_ms": self.finetune_since_ms,
+                "finetune_replay_ratio": (
+                    self.config.finetune_replay_ratio if self.pretrained else None
+                ),
+                "parent": (
+                    self.pretrained["config"].get("lineage")
+                    if self.pretrained
+                    else None
+                ),
+            },
         }
         config_path = Path("artifacts") / "deep_ae_config.pkl"
         joblib.dump(config_data, config_path)

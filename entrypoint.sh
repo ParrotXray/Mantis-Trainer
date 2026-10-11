@@ -17,6 +17,12 @@ fi
 [ "$DEEPAUTOENCODER" = "true" ] && CMD="$CMD --deepautoencoder"
 [ "$EXPORT" = "true" ] && CMD="$CMD --export"
 [ "$FEATUREANALYSIS" = "true" ] && CMD="$CMD --feature-analysis"
+if [ "$FINETUNE" = "true" ]; then
+    CMD="$CMD --finetune"
+elif [ -n "$FINETUNE" ] && [ "$FINETUNE" != "false" ]; then
+    CMD="$CMD --finetune $FINETUNE"
+fi
+[ -n "$FINETUNE_SINCE" ] && CMD="$CMD --finetune-since $FINETUNE_SINCE"
 [ -n "$RESUME" ] && CMD="$CMD --resume $RESUME"
 
 exec $CMD "$@"

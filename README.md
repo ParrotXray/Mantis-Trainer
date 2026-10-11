@@ -170,6 +170,8 @@ docker run --ipc=host --gpus all \
 | `DATAPREPROCESS` | Run preprocessing (`true`/`false`) |
 | `DEEPAUTOENCODER` | Train autoencoder (`true`/`false`) |
 | `EXPORT` | Export to ONNX (`true`/`false`) |
+| `FINETUNE` | Finetune a finished model on newer data: `true` (model in `artifacts/`, backed up to `artifacts/pretrained_<time>/` first) or a model directory |
+| `FINETUNE_SINCE` | Optional: UTC date where the new data starts, e.g. `2026-10-03` (default: end of the pretrained model's training data) |
 | `FEATUREANALYSIS` | Per-feature error analysis of the trained model in `artifacts/`, no retraining (`true`/`false`) |
 
 ### Build Docker Image Locally

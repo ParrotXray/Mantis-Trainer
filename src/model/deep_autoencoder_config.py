@@ -29,6 +29,12 @@ class DeepAutoencoderConfig:
     # down: presence per split, daily FPR, and the destinations blamed.
     analysis_top_hosts: int = 3
 
+    # --finetune: learning rate multiplier on learning_rate, and the share of
+    # old-data training windows replayed alongside the new data so the model
+    # does not forget the traffic it learned before.
+    finetune_lr_scale: float = 0.1
+    finetune_replay_ratio: float = 0.5
+
     fill_value: float = 0.0
 
     window_size: int = 15

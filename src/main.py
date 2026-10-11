@@ -41,6 +41,8 @@ Examples:
   python main.py -da                        # Train LSTM Autoencoder
   python main.py -ep                        # Export to ONNX
   python main.py -fa                        # Feature error analysis of trained model
+  python main.py --finetune                 # Finetune ./artifacts model on newer data
+  python main.py --finetune ./old_model --finetune-since 2026-10-03
 
 Available datasets: {', '.join(available)}
         """,
@@ -82,12 +84,33 @@ Available datasets: {', '.join(available)}
     )
 
     parser.add_argument(
+        "--finetune",
+        nargs="?",
+        const="./artifacts",
+        default=None,
+        metavar="MODEL_DIR",
+        help="Finetune a finished model (dir with deep_autoencoder.pt and "
+        "deep_ae_config.pkl, default ./artifacts) on newer data, reusing its "
+        "preprocessing and structure; ./artifacts is backed up first",
+    )
+    parser.add_argument(
+        "--finetune-since",
+        default=None,
+        metavar="DATE",
+        help="UTC date/time where the new data starts (e.g. 2026-10-03); "
+        "defaults to the end of the pretrained model's training data",
+    )
+
+    parser.add_argument(
         "--resume",
         default=None,
         help="Resume training from checkpoint (e.g. ./artifacts/autoencoder_temp-v14.ckpt)",
     )
 
     args = parser.parse_args()
+
+    if args.finetune and (args.all or args.deepautoencoder):
+        parser.error("--finetune replaces -da/-a training; use one or the other")
 
     if not any(
         [
@@ -96,6 +119,7 @@ Available datasets: {', '.join(available)}
             args.deepautoencoder,
             args.export,
             args.feature_analysis,
+            args.finetune,
         ]
     ):
         parser.print_help()
@@ -158,6 +182,32 @@ Available datasets: {', '.join(available)}
             f"LSTM Deep Autoencoder execution time: {timedelta(seconds=(deep_autoencoder_end - deep_autoencoder_start))}"
         )
 
+    if args.finetune:
+        finetune_start = time.perf_counter()
+
+        with pipeline_stage("LSTM Deep Autoencoder Finetune"):
+            with DeepAutoencoder() as da:
+                da.check_environment()
+                da.load_data()
+                da.load_pretrained(args.finetune, since=args.finetune_since)
+                da.prepare_data()
+                da.preprocess_data()
+                da.build_sequences()
+                da.build_autoencoder()
+                da.finetune_baseline()
+                da.train_autoencoder()
+                da.predict_autoencoder()
+                da.finetune_report()
+                da.analyze_feature_errors()
+                da.bootstrap_metrics()
+                da.save_results()
+                da.generate_visualizations()
+
+        finetune_end = time.perf_counter()
+        log.info(
+            f"Finetune execution time: {timedelta(seconds=(finetune_end - finetune_start))}"
+        )
+
     if args.feature_analysis:
         feature_analysis_start = time.perf_counter()
 
@@ -165,6 +215,7 @@ Available datasets: {', '.join(available)}
             with DeepAutoencoder() as da:
                 da.check_environment()
                 da.load_data()
+                da.match_trained_split()
                 da.prepare_data()
                 da.preprocess_data()
                 da.load_trained_model()
