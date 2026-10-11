@@ -16,6 +16,7 @@ fi
 [ "$DATAPREPROCESS" = "true" ] && CMD="$CMD --datapreprocess"
 [ "$DEEPAUTOENCODER" = "true" ] && CMD="$CMD --deepautoencoder"
 [ "$EXPORT" = "true" ] && CMD="$CMD --export"
+[ "$FEATUREANALYSIS" = "true" ] && CMD="$CMD --feature-analysis"
 [ -n "$RESUME" ] && CMD="$CMD --resume $RESUME"
 
 exec $CMD "$@"

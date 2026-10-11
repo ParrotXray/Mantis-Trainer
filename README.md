@@ -170,6 +170,7 @@ docker run --ipc=host --gpus all \
 | `DATAPREPROCESS` | Run preprocessing (`true`/`false`) |
 | `DEEPAUTOENCODER` | Train autoencoder (`true`/`false`) |
 | `EXPORT` | Export to ONNX (`true`/`false`) |
+| `FEATUREANALYSIS` | Per-feature error analysis of the trained model in `artifacts/`, no retraining (`true`/`false`) |
 
 ### Build Docker Image Locally
 
