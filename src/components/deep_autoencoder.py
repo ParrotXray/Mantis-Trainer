@@ -258,6 +258,10 @@ def _fmt_utc(ms: float) -> str:
     return pd.to_datetime(int(ms), unit="ms", utc=True).strftime("%Y-%m-%d %H:%M:%S")
 
 
+# finetune_since_ms sentinel: every loaded benign flow is new data.
+_ALL_DATA_IS_NEW = -(2**62)
+
+
 def _rate(mask: np.ndarray) -> float:
     return float(mask.mean()) if len(mask) else float("nan")
 
@@ -534,7 +538,13 @@ class DeepAutoencoder:
             new, old = benign_sorted[is_new], benign_sorted[~is_new]
             if len(new) == 0:
                 raise TrainingError(
-                    f"No benign flows from {_fmt_utc(self.finetune_since_ms)} UTC on; "
+                    "No new benign flows"
+                    + (
+                        ""
+                        if self.finetune_since_ms == _ALL_DATA_IS_NEW
+                        else f" from {_fmt_utc(self.finetune_since_ms)} UTC on"
+                    )
+                    + "; "
                     "preprocess a dataset that includes the new data"
                 )
             self.benign_train, self.benign_val, benign_test = self._split_by_time(
@@ -552,8 +562,9 @@ class DeepAutoencoder:
             )
             if len(old) == 0:
                 self.log.warning(
-                    "No flows before the new data: nothing to replay or to check "
-                    "forgetting against — preprocess the old and new datasets together"
+                    "Finetuning on new data only (no old flows to replay or to "
+                    "check forgetting against): dataset B should cover all the "
+                    "normal traffic the model must keep accepting"
                 )
             if len(self.benign_train) == 0 or len(self.benign_val) == 0:
                 raise TrainingError("Too little new data for a train/val split")
@@ -1013,14 +1024,17 @@ class DeepAutoencoder:
         elif lineage.get("train_end_ms") is not None:
             self.finetune_since_ms = int(lineage["train_end_ms"]) + 1
         else:
-            raise TrainingError(
-                "The pretrained model does not record when its training data "
-                "ends; pass --finetune-since YYYY-MM-DD (UTC) to mark where the "
-                "new data starts."
-            )
+            # No date given or recorded: every benign flow loaded is new data
+            # (dataset B only); old data A is not needed.
+            self.finetune_since_ms = _ALL_DATA_IS_NEW
+        start = (
+            "all loaded data"
+            if self.finetune_since_ms == _ALL_DATA_IS_NEW
+            else f"{_fmt_utc(self.finetune_since_ms)} UTC"
+        )
         self.log.info(
-            f"Finetuning from {self.pretrained_source} — new data from "
-            f"{_fmt_utc(self.finetune_since_ms)} UTC, lr x{self.config.finetune_lr_scale}, "
+            f"Finetuning from {self.pretrained_source} — new data: {start}, "
+            f"lr x{self.config.finetune_lr_scale}, "
             f"replay ratio {self.config.finetune_replay_ratio}"
         )
 
@@ -1061,8 +1075,11 @@ class DeepAutoencoder:
     def _preprocess_frozen(self) -> None:
         cfg = self.pretrained["config"]
         if list(cfg["feature_names"]) != list(self._feature_cols):
+            missing = [f for f in cfg["feature_names"] if f not in self._feature_cols]
             raise TrainingError(
-                "Feature set differs from the pretrained model; retrain from scratch"
+                "New data does not have the pretrained model's features "
+                f"(missing: {missing or 'none — different order/extra columns'}); "
+                "finetuning needs the same features, otherwise retrain from scratch"
             )
         self.log_transform_features = list(cfg["log_transform_features"])
         self.clip_params = cfg["clip_params"]

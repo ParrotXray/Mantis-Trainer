@@ -97,8 +97,10 @@ Available datasets: {', '.join(available)}
         "--finetune-since",
         default=None,
         metavar="DATE",
-        help="UTC date/time where the new data starts (e.g. 2026-10-03); "
-        "defaults to the end of the pretrained model's training data",
+        help="Optional UTC date/time where the new data starts (e.g. "
+        "2026-10-03); earlier flows are replayed against forgetting. Default: "
+        "the end of the pretrained model's training data if recorded, else "
+        "all loaded data is new",
     )
 
     parser.add_argument(
