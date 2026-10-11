@@ -25,6 +25,9 @@ class DeepAutoencoderConfig:
     # Val threshold (key of ae_thresholds) used by analyze_feature_errors to
     # split benign test windows into false positives vs true negatives.
     analysis_threshold: str = "p99"
+    # How many src_ips (most false positives first) get the per-host drill
+    # down: presence per split, daily FPR, and the destinations blamed.
+    analysis_top_hosts: int = 3
 
     fill_value: float = 0.0
 

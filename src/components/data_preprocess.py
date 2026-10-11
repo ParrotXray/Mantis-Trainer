@@ -7,6 +7,7 @@ import pandas as pd
 import ujson
 
 from model import (
+    ANALYSIS_META_COLUMNS,
     FLOW_ORDER_COLUMN,
     SEQUENCE_META_COLUMNS,
     UNIFIED_FEATURE_NAMES,
@@ -290,6 +291,12 @@ class DataPreprocess:
             else:
                 self.feature_matrix[meta_col] = self.combined_data[meta_col].values
 
+        for meta_col in ANALYSIS_META_COLUMNS:
+            if meta_col in self.combined_data.columns:
+                self.feature_matrix[meta_col] = (
+                    self.combined_data[meta_col].astype(str).str.strip().values
+                )
+
         if (
             "_file_key" in self.combined_data.columns
             and "timestamp" in self.feature_matrix.columns
@@ -306,7 +313,7 @@ class DataPreprocess:
         pct_nan = n_nan / n_total * 100 if n_total > 0 else 0
         meta_present = [
             c
-            for c in SEQUENCE_META_COLUMNS + [FLOW_ORDER_COLUMN]
+            for c in SEQUENCE_META_COLUMNS + [FLOW_ORDER_COLUMN] + ANALYSIS_META_COLUMNS
             if c in self.feature_matrix.columns
         ]
         self.log.info(

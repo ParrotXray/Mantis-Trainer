@@ -30,6 +30,7 @@ from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 
 from model import (
+    ANALYSIS_META_COLUMNS,
     FLOW_ORDER_COLUMN,
     SEQUENCE_META_COLUMNS,
     UNIFIED_FEATURE_NAMES,
@@ -480,7 +481,9 @@ class DeepAutoencoder:
             )
 
         order_cols = [c for c in [FLOW_ORDER_COLUMN] if c in self.benign_data.columns]
-        all_cols = available_features + meta_cols + order_cols + ["Label"]
+        # dst_ip/dst_port ride along for analyze_feature_errors only.
+        extra_cols = [c for c in ANALYSIS_META_COLUMNS if c in self.benign_data.columns]
+        all_cols = available_features + meta_cols + order_cols + extra_cols + ["Label"]
         benign_all = self.benign_data[all_cols].copy()
 
         # Split by flow start time; same-second ties keep drain order.
@@ -512,7 +515,9 @@ class DeepAutoencoder:
         atk_meta_cols = [
             c for c in SEQUENCE_META_COLUMNS if c in self.attack_data.columns
         ]
-        atk_cols = available_features + atk_meta_cols + order_cols + ["Label"]
+        atk_cols = (
+            available_features + atk_meta_cols + order_cols + extra_cols + ["Label"]
+        )
         attack_all = self.attack_data[
             [c for c in atk_cols if c in self.attack_data.columns]
         ].copy()
@@ -1104,25 +1109,30 @@ class DeepAutoencoder:
             f"(thresholds={list(self.ae_threshold)})"
         )
 
-    def _ae_predict_feature_err(self, sequences: np.ndarray) -> np.ndarray:
-        # Squared error averaged over timesteps, shape (n, F); its mean over
-        # features is exactly the anomaly score from _ae_predict_mse.
+    def _ae_predict_feature_err(
+        self, sequences: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        # Squared error averaged over timesteps, shape (n, F) — its mean over
+        # features is exactly the anomaly score from _ae_predict_mse — and
+        # averaged over features, shape (n, W), to find the worst step (the
+        # flow Mantis blames for the alert).
         self.lightning_module.eval()
         self.lightning_module.to(self.device)
 
-        n, _, n_features = sequences.shape
+        n, window, n_features = sequences.shape
         feat_err = np.zeros((n, n_features), dtype=np.float32)
+        step_err = np.zeros((n, window), dtype=np.float32)
 
         with torch.no_grad():
             for start in range(0, n, self.config.inference_batch_size):
                 end = min(start + self.config.inference_batch_size, n)
                 batch = torch.FloatTensor(sequences[start:end]).to(self.device)
                 recon = self.lightning_module(batch).cpu().numpy()
-                feat_err[start:end] = np.mean(
-                    np.square(sequences[start:end] - recon), axis=1
-                )
+                sq = np.square(sequences[start:end] - recon)
+                feat_err[start:end] = sq.mean(axis=1)
+                step_err[start:end] = sq.mean(axis=2)
 
-        return feat_err
+        return feat_err, step_err
 
     def analyze_feature_errors(self) -> None:
         # Which features push benign test windows over the val threshold
@@ -1143,7 +1153,7 @@ class DeepAutoencoder:
             self.config.window_size,
             rows=benign_rows,
         )
-        feat_err = self._ae_predict_feature_err(seqs)
+        feat_err, step_err = self._ae_predict_feature_err(seqs)
         del seqs
         scores = feat_err.mean(axis=1)
         fp = scores > threshold
@@ -1217,6 +1227,168 @@ class DeepAutoencoder:
                 lines.append(
                     f"  {str(ip):<40} {int(row['size']):>9,} {int(row['sum']):>9,} "
                     f"{row['sum'] / row['size']:>9.2%} {row['sum'] / n_fp:>9.2%}"
+                )
+            self.log.info("\n".join(lines))
+
+            top_hosts = [
+                ip
+                for ip in by_ip.index[: self.config.analysis_top_hosts]
+                if by_ip.at[ip, "sum"] > 0
+            ]
+            for host in top_hosts:
+                m = ips == host
+                self._analyze_fp_host(
+                    host, benign_rows[m], fp[m], step_err[m], threshold, name
+                )
+
+    def _analyze_fp_host(
+        self,
+        host: str,
+        rows: np.ndarray,
+        fp: np.ndarray,
+        step_err: np.ndarray,
+        threshold: float,
+        name: str,
+    ) -> None:
+        # Drill-down on one src_ip with many false positives: was it in
+        # training, when did its FPR rise, and which destinations get blamed.
+        W = self.config.window_size
+        test_benign = self.test_df.iloc[
+            self.test_eval_rows[(self.test_labels == 0).values]
+        ]
+
+        # 1. Presence per split
+        lines = [
+            f"\n[{host}] presence per split (benign flows):",
+            f"  {'Split':<6} {'Flows':>10} {'% of split':>11}",
+        ]
+        for split, df in [
+            ("train", self.benign_train),
+            ("val", self.benign_val),
+            ("test", test_benign),
+        ]:
+            n_host = int((df["src_ip"] == host).sum())
+            lines.append(
+                f"  {split:<6} {n_host:>10,} {n_host / max(len(df), 1):>11.2%}"
+            )
+        self.log.info("\n".join(lines))
+
+        # 2. Daily FPR (UTC days) over val + test; train shows flow counts
+        val_host = (self.benign_val["src_ip"] == host).values
+        val_rows = np.flatnonzero((_window_fill(self.benign_val, W) >= W) & val_host)
+        val_scores = (
+            self._ae_predict_mse(
+                _make_per_flow_sequences(
+                    self.benign_val, self.benign_val_scaled, W, rows=val_rows
+                )
+            )
+            if len(val_rows)
+            else np.zeros(0, dtype=np.float32)
+        )
+
+        def _day(ts: np.ndarray) -> np.ndarray:
+            return np.asarray(
+                pd.to_datetime(ts, unit="ms", utc=True).strftime("%Y-%m-%d")
+            )
+
+        train_ts = self.benign_train.loc[
+            self.benign_train["src_ip"] == host, "timestamp"
+        ].values
+        daily = (
+            pd.concat(
+                [
+                    pd.DataFrame(
+                        {"day": _day(train_ts), "split": "train", "fp": np.nan}
+                    ),
+                    pd.DataFrame(
+                        {
+                            "day": _day(self.benign_val["timestamp"].values[val_rows]),
+                            "split": "val",
+                            "fp": (val_scores > threshold).astype(float),
+                        }
+                    ),
+                    pd.DataFrame(
+                        {
+                            "day": _day(self.test_df["timestamp"].values[rows]),
+                            "split": "test",
+                            "fp": fp.astype(float),
+                        }
+                    ),
+                ],
+                ignore_index=True,
+            )
+            .assign(
+                split=lambda d: pd.Categorical(
+                    d["split"], ["train", "val", "test"], ordered=True
+                )
+            )
+            .groupby(["day", "split"], sort=True, observed=True)["fp"]
+            .agg(["size", "sum", "mean"])
+        )
+        lines = [
+            f"\n[{host}] daily benign FPR @ {name} "
+            "(UTC days; train rows are flow counts, not scored):",
+            f"  {'Day':<11} {'Split':<6} {'Windows':>9} {'FP':>8} {'FP rate':>9}",
+        ]
+        for (day, split), r in daily.iterrows():
+            if split == "train":
+                lines.append(
+                    f"  {day:<11} {split:<6} {int(r['size']):>9,} {'-':>8} {'-':>9}"
+                )
+            else:
+                lines.append(
+                    f"  {day:<11} {split:<6} {int(r['size']):>9,} "
+                    f"{int(r['sum']):>8,} {r['mean']:>9.2%}"
+                )
+        self.log.info("\n".join(lines))
+
+        # 3. Destinations of the blamed (worst-step) flow, as Mantis reports
+        dst_cols = [c for c in ANALYSIS_META_COLUMNS if c in self.test_df.columns]
+        if not dst_cols:
+            self.log.info(
+                f"[{host}] no dst_ip/dst_port in the data — rerun preprocessing "
+                "to see which destinations the false positives go to"
+            )
+            return
+        if len(self.test_df) >= 2**24:
+            self.log.warning(f"[{host}] test set too large to map blamed flows")
+            return
+        # Window step -> test_df row (float32 is exact below 2**24).
+        flow_ids = (
+            _make_per_flow_sequences(
+                self.test_df,
+                np.arange(1, len(self.test_df) + 1, dtype=np.float32)[:, None],
+                W,
+                rows=rows,
+            )[:, :, 0].astype(np.int64)
+            - 1
+        )
+        blamed = flow_ids[np.arange(len(rows)), step_err.argmax(axis=1)]
+
+        train_host = self.benign_train[self.benign_train["src_ip"] == host]
+        n_fp = max(int(fp.sum()), 1)
+        for col in dst_cols:
+            vals = self.test_df[col].astype(str).values[blamed]
+            by_dst = (
+                pd.DataFrame({"dst": vals, "fp": fp})
+                .groupby("dst")["fp"]
+                .agg(["size", "sum"])
+                .sort_values("sum", ascending=False)
+            )
+            seen_host = train_host[col].astype(str).value_counts()
+            seen_all = self.benign_train[col].astype(str).value_counts()
+            lines = [
+                f"\n[{host}] false positives by blamed {col} @ {name} "
+                "(top 15; Train = flows to it in training):",
+                f"  {col:<40} {'Windows':>9} {'FP':>8} {'FP rate':>9} "
+                f"{'% of FP':>8} {'Train(host)':>12} {'Train(all)':>11}",
+            ]
+            for dst, r in by_dst.head(15).iterrows():
+                lines.append(
+                    f"  {dst:<40} {int(r['size']):>9,} {int(r['sum']):>8,} "
+                    f"{r['sum'] / r['size']:>9.2%} {r['sum'] / n_fp:>8.2%} "
+                    f"{int(seen_host.get(dst, 0)):>12,} "
+                    f"{int(seen_all.get(dst, 0)):>11,}"
                 )
             self.log.info("\n".join(lines))
 

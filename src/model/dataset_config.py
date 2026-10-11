@@ -16,6 +16,9 @@ SEQUENCE_META_COLUMNS: Final[List[str]] = ["timestamp", "src_ip"]
 # drained, i.e. the order live inference buffers flows per src_ip).
 # Optional: windows fall back to "timestamp" order when it is absent.
 FLOW_ORDER_COLUMN: Final[str] = "flow_seq"
+# Kept in the parquet for analysis only (where false positives go); never
+# model inputs.
+ANALYSIS_META_COLUMNS: Final[List[str]] = ["dst_ip", "dst_port"]
 
 UNIFIED_FEATURE_NAMES: Final[List[str]] = [
     "flow_duration",
@@ -234,6 +237,8 @@ _EXTENDED_COLUMN_MAPPING: Final[Dict[str, str]] = {
     "Timestamp": "timestamp",
     "Src IP": "src_ip",
     "Source IP": "src_ip",
+    "Dst IP": "dst_ip",
+    "Destination IP": "dst_ip",
 }
 
 
