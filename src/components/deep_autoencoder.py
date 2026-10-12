@@ -899,6 +899,11 @@ class DeepAutoencoder:
         else:
             self.log.info("No checkpoint provided, starting training from scratch...")
 
+        # Scoring before training (finetune_baseline) leaves the module in
+        # eval mode, and Lightning restores that mode after its validation
+        # sanity check: cuDNN then refuses the LSTM backward, and on CPU
+        # dropout would silently stay off for the whole training.
+        self.lightning_module.train()
         trainer.fit(
             self.lightning_module,
             train_loader,
