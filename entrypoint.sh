@@ -22,6 +22,12 @@ if [ "$FINETUNE" = "true" ]; then
 elif [ -n "$FINETUNE" ] && [ "$FINETUNE" != "false" ]; then
     CMD="$CMD --finetune $FINETUNE"
 fi
+if [ "$SCORE" = "true" ]; then
+    CMD="$CMD --score"
+elif [ -n "$SCORE" ] && [ "$SCORE" != "false" ]; then
+    CMD="$CMD --score $SCORE"
+fi
+[ -n "$THRESHOLD" ] && CMD="$CMD --threshold $THRESHOLD"
 [ -n "$RESUME" ] && CMD="$CMD --resume $RESUME"
 
 exec $CMD "$@"

@@ -431,6 +431,8 @@ class DeepAutoencoder:
         # Finetune (load_pretrained): the source model and its FPR before.
         self.pretrained: Optional[Dict] = None
         self.pretrained_source: Optional[str] = None
+        # --score: all loaded benign flows are scored, nothing is trained.
+        self.score_mode: bool = False
         self.finetune_before: Optional[Dict[str, float]] = None
         self.split_ranges: Dict[str, List[int]] = {}
 
@@ -517,11 +519,16 @@ class DeepAutoencoder:
         val_frac = self.config.validation_split
 
         # Finetune uses the same split: all loaded data is the new data.
+        # --score: everything is scored, nothing is trained or calibrated.
+        if self.score_mode:
+            val_frac, test_frac = 0.0, 1.0
         self.benign_train, self.benign_val, benign_test = self._split_by_time(
             benign_sorted, val_frac, test_frac
         )
-        if self.pretrained is not None and (
-            len(self.benign_train) == 0 or len(self.benign_val) == 0
+        if (
+            self.pretrained is not None
+            and not self.score_mode
+            and (len(self.benign_train) == 0 or len(self.benign_val) == 0)
         ):
             raise TrainingError("Too little new data for a train/val split")
 
@@ -552,6 +559,8 @@ class DeepAutoencoder:
         attack_all = self.attack_data[
             [c for c in atk_cols if c in self.attack_data.columns]
         ].copy()
+        if self.score_mode:
+            attack_all = attack_all.iloc[:0]
 
         test_labels_orig = pd.concat(
             [benign_test["Label"], attack_all["Label"]],
@@ -959,11 +968,78 @@ class DeepAutoencoder:
             )
             self.config.window_size = ckpt["window_size"]
 
-        self.log.info(
-            f"Finetuning from {self.pretrained_source} on all loaded data, "
-            f"lr x{self.config.finetune_lr_scale} — the new data should cover all "
-            "normal traffic the model must keep accepting (no old data replayed)"
+        if backup:
+            self.log.info(
+                f"Finetuning from {self.pretrained_source} on all loaded data, "
+                f"lr x{self.config.finetune_lr_scale} — the new data should cover "
+                "all normal traffic the model must keep accepting (no old data "
+                "replayed)"
+            )
+        else:
+            self.log.info(
+                f"Using model {self.pretrained_source} with its frozen preprocessing"
+            )
+
+    def load_for_scoring(self, model_dir: str = "./artifacts") -> None:
+        # --score: model + frozen preprocessing from model_dir, thresholds
+        # from its config; nothing is backed up, trained or recalibrated.
+        self.score_mode = True
+        self.load_pretrained(model_dir, backup=False)
+        self.ae_threshold = self.pretrained["config"]["ae_thresholds"]
+        if self.config.analysis_threshold not in self.ae_threshold:
+            raise TrainingError(
+                f"Unknown threshold '{self.config.analysis_threshold}'; "
+                f"choose one of {list(self.ae_threshold)}"
+            )
+
+    def score_report(self) -> None:
+        # Scores every full benign window of the loaded data with the saved
+        # thresholds, to compare against the alert rate Mantis sees live on
+        # the same period (e.g. one day's traffic_log CSV).
+        name = self.config.analysis_threshold
+        threshold = self.ae_threshold[name]
+        self._select_full_test_windows()
+        rows = self.test_eval_rows
+        scores = self._ae_predict_mse(
+            _make_per_flow_sequences(
+                self.test_df,
+                self.test_features_scaled,
+                self.config.window_size,
+                rows=rows,
+            )
         )
+        self.ae_mse_scores = scores
+        ts = self.test_df["timestamp"].values[rows]
+        self.log.info(
+            f"\nScored {len(scores):,} full benign windows "
+            f"({_fmt_utc(ts.min())} .. {_fmt_utc(ts.max())} UTC); "
+            f"score median={np.median(scores):.6f}, p99={np.percentile(scores, 99):.6f}"
+        )
+
+        hourly = (
+            pd.DataFrame(
+                {
+                    "hour": np.asarray(
+                        pd.to_datetime(ts, unit="ms", utc=True).strftime(
+                            "%Y-%m-%d %H:00"
+                        )
+                    ),
+                    "fp": scores > threshold,
+                }
+            )
+            .groupby("hour", sort=True)["fp"]
+            .agg(["size", "sum"])
+        )
+        lines = [
+            f"\nHourly benign FPR @ {name}={threshold:.6f} (UTC):",
+            f"  {'Hour':<17} {'Windows':>9} {'FP':>8} {'FP rate':>9}",
+        ]
+        for hour, r in hourly.iterrows():
+            lines.append(
+                f"  {hour:<17} {int(r['size']):>9,} {int(r['sum']):>8,} "
+                f"{r['sum'] / r['size']:>9.2%}"
+            )
+        self.log.info("\n".join(lines))
 
     def match_trained_split(self, model_dir: str = "./artifacts") -> None:
         # For -fa on a finetuned model: use its frozen preprocessing (refitting
@@ -1017,8 +1093,10 @@ class DeepAutoencoder:
         )
 
         # New values beyond the frozen winsorize bounds get clipped: a high
-        # share means the new traffic outgrew the old preprocessing.
-        raw = self.benign_train[self._feature_cols].replace([np.inf, -np.inf], np.nan)
+        # share means the new traffic outgrew the old preprocessing. --score
+        # has no train split, so it reports on the scored benign flows.
+        ref = self.benign_train if len(self.benign_train) else self.test_df
+        raw = ref[self._feature_cols].replace([np.inf, -np.inf], np.nan)
         raw = raw.fillna(self.config.fill_value)
         for col in self.log_transform_features:
             raw[col] = np.log1p(raw[col].clip(lower=0))
@@ -1029,14 +1107,15 @@ class DeepAutoencoder:
             rows.append((col, below, above))
         rows.sort(key=lambda r: -(r[1] + r[2]))
         self.log.info(
-            "New train data outside the frozen winsorize bounds "
+            f"{'Scored' if self.score_mode else 'New train'} data outside the "
+            "frozen winsorize bounds "
             "(pretrained bounds keep ~0.5% per side; much more = outgrown):\n"
             + "\n".join(
                 f"  {c:<22} below={b:7.2%}  above={a:7.2%}" for c, b, a in rows[:10]
             )
         )
 
-        train_feat = self._transform_features(self.benign_train)
+        train_feat = self._transform_features(ref)
         test_feat = self._transform_features(self.test_df)
 
         self.tail_test_masks = {}
@@ -1056,6 +1135,8 @@ class DeepAutoencoder:
                 )
 
         def _scale(feat: pd.DataFrame) -> np.ndarray:
+            if len(feat) == 0:  # --score has no train/val
+                return np.zeros((0, len(self._feature_cols)))
             return self.scaler.transform(feat)
 
         self.benign_train_scaled_raw = _scale(train_feat)
@@ -1523,21 +1604,28 @@ class DeepAutoencoder:
             self.test_eval_rows[(self.test_labels == 0).values]
         ]
 
-        # 1. Presence per split
-        lines = [
-            f"\n[{host}] presence per split (benign flows):",
-            f"  {'Split':<6} {'Flows':>10} {'% of split':>11}",
-        ]
+        # 1. Presence per split (no splits when scoring)
+        lines = (
+            []
+            if self.score_mode
+            else [
+                f"\n[{host}] presence per split (benign flows):",
+                f"  {'Split':<6} {'Flows':>10} {'% of split':>11}",
+            ]
+        )
         for split, df in [
             ("train", self.benign_train),
             ("val", self.benign_val),
             ("test", test_benign),
         ]:
+            if self.score_mode:
+                break
             n_host = int((df["src_ip"] == host).sum())
             lines.append(
                 f"  {split:<6} {n_host:>10,} {n_host / max(len(df), 1):>11.2%}"
             )
-        self.log.info("\n".join(lines))
+        if lines:
+            self.log.info("\n".join(lines))
 
         # 2. Daily FPR (UTC days) over val + test; train shows flow counts
         val_host = (self.benign_val["src_ip"] == host).values
@@ -1643,18 +1731,24 @@ class DeepAutoencoder:
             )
             seen_host = train_host[col].astype(str).value_counts()
             seen_all = self.benign_train[col].astype(str).value_counts()
+            # Training data is not loaded when scoring: no Train columns.
+            train_cols = not self.score_mode
             lines = [
-                f"\n[{host}] false positives by blamed {col} @ {name} "
-                "(top 15; Train = flows to it in training):",
-                f"  {col:<40} {'Windows':>9} {'FP':>8} {'FP rate':>9} "
-                f"{'% of FP':>8} {'Train(host)':>12} {'Train(all)':>11}",
+                f"\n[{host}] false positives by blamed {col} @ {name} (top 15"
+                + ("; Train = flows to it in training):" if train_cols else "):"),
+                f"  {col:<40} {'Windows':>9} {'FP':>8} {'FP rate':>9} {'% of FP':>8}"
+                + (f" {'Train(host)':>12} {'Train(all)':>11}" if train_cols else ""),
             ]
             for dst, r in by_dst.head(15).iterrows():
                 lines.append(
                     f"  {dst:<40} {int(r['size']):>9,} {int(r['sum']):>8,} "
-                    f"{r['sum'] / r['size']:>9.2%} {r['sum'] / n_fp:>8.2%} "
-                    f"{int(seen_host.get(dst, 0)):>12,} "
-                    f"{int(seen_all.get(dst, 0)):>11,}"
+                    f"{r['sum'] / r['size']:>9.2%} {r['sum'] / n_fp:>8.2%}"
+                    + (
+                        f" {int(seen_host.get(dst, 0)):>12,} "
+                        f"{int(seen_all.get(dst, 0)):>11,}"
+                        if train_cols
+                        else ""
+                    )
                 )
             self.log.info("\n".join(lines))
 

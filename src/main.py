@@ -7,7 +7,12 @@ import time
 from datetime import timedelta
 
 from components import DataPreprocess, DeepAutoencoder, Exporter
-from model import download_dataset, get_dataset_config, list_available_datasets
+from model import (
+    DeepAutoencoderConfig,
+    download_dataset,
+    get_dataset_config,
+    list_available_datasets,
+)
 from utils import Logger, pipeline_stage
 
 if __name__ == "__main__":
@@ -43,6 +48,7 @@ Examples:
   python main.py -fa                        # Feature error analysis of trained model
   python main.py --finetune                 # Finetune ./artifacts model on newer data
   python main.py --finetune ./old_model       # Finetune a model from another dir
+  python main.py --score --threshold p95      # Score loaded data with ./artifacts model
 
 Available datasets: {', '.join(available)}
         """,
@@ -95,6 +101,23 @@ Available datasets: {', '.join(available)}
     )
 
     parser.add_argument(
+        "--score",
+        nargs="?",
+        const="./artifacts",
+        default=None,
+        metavar="MODEL_DIR",
+        help="Score all preprocessed benign data with a finished model "
+        "(default ./artifacts) and its saved thresholds — no training — to "
+        "compare with the alert rate Mantis sees live on the same period",
+    )
+    parser.add_argument(
+        "--threshold",
+        default=None,
+        metavar="NAME",
+        help="Threshold for -fa/--score reports, e.g. p95 (default: p99)",
+    )
+
+    parser.add_argument(
         "--resume",
         default=None,
         help="Resume training from checkpoint (e.g. ./artifacts/autoencoder_temp-v14.ckpt)",
@@ -102,8 +125,19 @@ Available datasets: {', '.join(available)}
 
     args = parser.parse_args()
 
+    def _ae_config() -> DeepAutoencoderConfig:
+        cfg = DeepAutoencoderConfig()
+        if args.threshold:
+            cfg.analysis_threshold = args.threshold
+        return cfg
+
     if args.finetune and (args.all or args.deepautoencoder):
         parser.error("--finetune replaces -da/-a training; use one or the other")
+    if args.score and (args.all or args.datapreprocess):
+        parser.error(
+            "--score reads the preprocessed parquet; run -dp separately first "
+            "(into a separate outputs/ dir so the training data is not replaced)"
+        )
 
     if not any(
         [
@@ -113,6 +147,7 @@ Available datasets: {', '.join(available)}
             args.export,
             args.feature_analysis,
             args.finetune,
+            args.score,
         ]
     ):
         parser.print_help()
@@ -201,11 +236,30 @@ Available datasets: {', '.join(available)}
             f"Finetune execution time: {timedelta(seconds=(finetune_end - finetune_start))}"
         )
 
+    if args.score:
+        score_start = time.perf_counter()
+
+        with pipeline_stage("Score"):
+            with DeepAutoencoder(_ae_config()) as da:
+                da.check_environment()
+                da.load_data()
+                da.load_for_scoring(args.score)
+                da.prepare_data()
+                da.preprocess_data()
+                da.build_autoencoder()
+                da.score_report()
+                da.analyze_feature_errors()
+
+        score_end = time.perf_counter()
+        log.info(
+            f"Score execution time: {timedelta(seconds=(score_end - score_start))}"
+        )
+
     if args.feature_analysis:
         feature_analysis_start = time.perf_counter()
 
         with pipeline_stage("Feature Error Analysis"):
-            with DeepAutoencoder() as da:
+            with DeepAutoencoder(_ae_config()) as da:
                 da.check_environment()
                 da.load_data()
                 da.match_trained_split()

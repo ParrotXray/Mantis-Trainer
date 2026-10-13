@@ -171,6 +171,8 @@ docker run --ipc=host --gpus all \
 | `DEEPAUTOENCODER` | Train autoencoder (`true`/`false`) |
 | `EXPORT` | Export to ONNX (`true`/`false`) |
 | `FINETUNE` | Finetune a finished model on newer data: `true` (model in `artifacts/`, backed up to `artifacts/pretrained_<time>/` first) or a model directory |
+| `SCORE` | Score all preprocessed benign data with a finished model (`true` = `artifacts/`, or a model directory) and its saved thresholds, no training — compare with Mantis' live alert rate on the same period |
+| `THRESHOLD` | Threshold for `FEATUREANALYSIS` / `SCORE` reports, e.g. `p95` (default `p99`) |
 | `FEATUREANALYSIS` | Per-feature error analysis of the trained model in `artifacts/`, no retraining (`true`/`false`) |
 
 ### Build Docker Image Locally
