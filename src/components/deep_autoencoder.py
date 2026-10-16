@@ -182,6 +182,7 @@ class LSTMAutoencoderLightningModule(L.LightningModule):
         reduce_lr_patience: int = 5,
         min_lr: float = 1e-7,
         latent_norm_weight: float = 0.0,
+        reduce_lr_min_delta: float = 0.0,
     ):
         super().__init__()
         self.model = model
@@ -192,6 +193,7 @@ class LSTMAutoencoderLightningModule(L.LightningModule):
         self.reduce_lr_patience = reduce_lr_patience
         self.min_lr = min_lr
         self.latent_norm_weight = latent_norm_weight
+        self.reduce_lr_min_delta = reduce_lr_min_delta
         self.loss_fn = nn.MSELoss()
         self.save_hyperparameters(ignore=["model"])
 
@@ -242,6 +244,11 @@ class LSTMAutoencoderLightningModule(L.LightningModule):
             factor=self.reduce_lr_factor,
             patience=self.reduce_lr_patience,
             min_lr=self.min_lr,
+            # Same absolute bar as early stopping: PyTorch's default relative
+            # 1e-4 (~3e-7 at a ~3e-3 loss) let noise-level new bests reset
+            # patience, so lr never dropped before early stopping fired.
+            threshold=self.reduce_lr_min_delta,
+            threshold_mode="abs",
         )
         return {
             "optimizer": optimizer,
@@ -738,7 +745,14 @@ class DeepAutoencoder:
         n_synthetic = int(
             len(self.train_sequences) * self.config.synthetic_augmentation_ratio
         )
-        if n_synthetic > 0:
+        if n_synthetic > 0 and W == 1:
+            # A single random flow is just a duplicate of a training row:
+            # no new combinations, only a longer epoch.
+            self.log.info(
+                "Synthetic augmentation skipped: window_size=1 has no "
+                "flow combinations to synthesize"
+            )
+        elif n_synthetic > 0:
             rng = np.random.default_rng(self.config.split_random_state)
             synthetic_sequences = _make_synthetic_sequences(
                 self.benign_train_scaled, W, n_synthetic, rng
@@ -803,6 +817,7 @@ class DeepAutoencoder:
             reduce_lr_patience=self.config.reduce_lr_patience,
             min_lr=self.config.min_lr,
             latent_norm_weight=self.config.latent_norm_weight,
+            reduce_lr_min_delta=self.config.early_stopping_min_delta,
         )
 
         total_params = sum(p.numel() for p in self.autoencoder_model.parameters())
@@ -830,6 +845,7 @@ class DeepAutoencoder:
             reduce_lr_patience=self.config.reduce_lr_patience,
             min_lr=self.config.min_lr,
             latent_norm_weight=self.config.latent_norm_weight,
+            reduce_lr_min_delta=self.config.early_stopping_min_delta,
         )
         self.log.info(
             f"Loaded pretrained weights: input_dim={ckpt['input_dim']}, "

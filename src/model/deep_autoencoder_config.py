@@ -53,6 +53,8 @@ class DeepAutoencoderConfig:
     # Minimum val_loss drop that counts as an improvement for early stopping.
     # Must be meaningful against the loss scale (~5e-3): at 1e-6, ~1e-5-sized
     # gains at lr ~1e-5 kept resetting patience for 400+ epochs.
+    # Also the ReduceLROnPlateau threshold (absolute), so lr drops on the
+    # same notion of "no improvement" that early stopping uses.
     early_stopping_min_delta: float = 1e-5
     reduce_lr_patience: int = 3
     reduce_lr_factor: float = 0.5
@@ -67,5 +69,6 @@ class DeepAutoencoderConfig:
     # flows at random from the whole scaled benign pool (src_ip/time ignored),
     # widening the combinations of interleaved flow types seen during
     # training beyond what naturally co-occurred in the captured order.
-    # 0 disables it. Train-only — val/test stay untouched for honest eval.
+    # 0 disables it; skipped at window_size=1 (nothing to combine).
+    # Train-only — val/test stay untouched for honest eval.
     synthetic_augmentation_ratio: float = 0.2
