@@ -1535,9 +1535,7 @@ class DeepAutoencoder:
             f"{'Name':<14} {'Threshold':<14} {'Val FPR':<10} {'Test FPR':<10}",
             "-" * 50,
         ]
-        val_fpr = {
-            _percentile_name(p): (100 - p) / 100 for p in THRESHOLD_PERCENTILES
-        }
+        val_fpr = {_percentile_name(p): (100 - p) / 100 for p in THRESHOLD_PERCENTILES}
         for n_, t in self.ae_threshold.items():
             vf = f"{val_fpr[n_]:.2%}" if n_ in val_fpr else "-"
             lines.append(
