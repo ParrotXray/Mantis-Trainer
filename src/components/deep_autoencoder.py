@@ -261,6 +261,15 @@ class LSTMAutoencoderLightningModule(L.LightningModule):
         }
 
 
+# Val-percentile thresholds: p90..p99, plus stricter p99.5 / p99.9 for
+# deployments where drift pushes test FPR above val's nominal rate.
+THRESHOLD_PERCENTILES = [*range(90, 100), 99.5, 99.9]
+
+
+def _percentile_name(p: float) -> str:
+    return f"p{p:g}"
+
+
 def _fmt_utc(ms: float) -> str:
     return pd.to_datetime(int(ms), unit="ms", utc=True).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -1287,7 +1296,7 @@ class DeepAutoencoder:
             else 0
         )
 
-        candidate_names = [f"p{p}" for p in range(90, 100)] + [
+        candidate_names = [_percentile_name(p) for p in THRESHOLD_PERCENTILES] + [
             "mean+2std",
             "mean+1std",
             "Q3+1.5IQR",
@@ -1299,7 +1308,7 @@ class DeepAutoencoder:
         iqr_val = q3_val - q1_val
 
         val_candidate_values = np.array(
-            [float(np.percentile(val_scores, p)) for p in range(90, 100)]
+            [float(np.percentile(val_scores, p)) for p in THRESHOLD_PERCENTILES]
             + [
                 float(val_scores.mean() + 2 * val_scores.std()),
                 float(val_scores.mean() + 1 * val_scores.std()),
@@ -1313,7 +1322,7 @@ class DeepAutoencoder:
         iqr_test = q3_test - q1_test
 
         test_candidate_values = np.array(
-            [float(np.percentile(ae_mse_benign, p)) for p in range(90, 100)]
+            [float(np.percentile(ae_mse_benign, p)) for p in THRESHOLD_PERCENTILES]
             + [
                 float(ae_mse_benign.mean() + 2 * ae_mse_benign.std()),
                 float(ae_mse_benign.mean() + 1 * ae_mse_benign.std()),
@@ -1526,7 +1535,9 @@ class DeepAutoencoder:
             f"{'Name':<14} {'Threshold':<14} {'Val FPR':<10} {'Test FPR':<10}",
             "-" * 50,
         ]
-        val_fpr = {f"p{p}": (100 - p) / 100 for p in range(90, 100)}
+        val_fpr = {
+            _percentile_name(p): (100 - p) / 100 for p in THRESHOLD_PERCENTILES
+        }
         for n_, t in self.ae_threshold.items():
             vf = f"{val_fpr[n_]:.2%}" if n_ in val_fpr else "-"
             lines.append(

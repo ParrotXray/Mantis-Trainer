@@ -114,7 +114,7 @@ Available datasets: {', '.join(available)}
         "--threshold",
         default=None,
         metavar="NAME",
-        help="Threshold for -fa/--score reports, e.g. p95 (default: p99)",
+        help="Threshold for -fa/--score reports, e.g. p95, p99.5 (default: p99)",
     )
 
     parser.add_argument(
