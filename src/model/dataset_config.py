@@ -22,7 +22,9 @@ FLOW_ORDER_COLUMN: Final[str] = "flow_seq"
 ML_VERDICT_COLUMN: Final[str] = "ML Verdict"
 # Kept in the parquet for analysis only (where false positives go); never
 # model inputs.
-ANALYSIS_META_COLUMNS: Final[List[str]] = ["dst_ip", "dst_port"]
+# "direction" is Mantis's capture side of the flow's initiator: egress =
+# started from the internal network, ingress = started from outside.
+ANALYSIS_META_COLUMNS: Final[List[str]] = ["dst_ip", "dst_port", "direction"]
 
 UNIFIED_FEATURE_NAMES: Final[List[str]] = [
     "flow_duration",
@@ -190,6 +192,7 @@ _EXTENDED_COLUMN_MAPPING: Final[Dict[str, str]] = {
     "Flow IAT Mean": "flow_iat_mean",
     "Packet Length Mean": "pkt_len_mean",
     "Destination Port": "dst_port",
+    "Direction": "direction",
     "Protocol": "protocol",
     "PSH Flag Count": "psh_flag_cnt",
     "ACK Flag Count": "ack_flag_cnt",

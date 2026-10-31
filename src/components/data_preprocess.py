@@ -217,6 +217,11 @@ class DataPreprocess:
             combined_raw = self._drop_excluded_verdicts(
                 combined_raw, ds_config.kaggle_dataset_id
             )
+            if "Direction" in combined_raw.columns:
+                self.log.info(
+                    f"{ds_config.kaggle_dataset_id}: Direction distribution:\n"
+                    f"{combined_raw['Direction'].astype(str).str.strip().value_counts().to_string()}"
+                )
 
             # Extract labels BEFORE column mapping (uses original column names)
             labels = ds_config.extract_labels(combined_raw)
