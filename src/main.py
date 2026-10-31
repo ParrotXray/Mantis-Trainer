@@ -52,7 +52,7 @@ Examples:
   python main.py --score --threshold p95      # Score loaded data with ./artifacts model
 
   # Mantis-recorded CSVs: choose which "ML Verdict" rows to drop
-  python main.py -s xxx/xxx-dataset -a --exclude-verdicts confirmed_attack,anomaly
+  python main.py -s xxx/xxx-dataset -a --exclude-verdicts confirmed_attack,rule_match,structural
   python main.py -s xxx/xxx-dataset -a --exclude-verdicts none
 
 Available datasets: {', '.join(available)}
@@ -124,10 +124,10 @@ Available datasets: {', '.join(available)}
 
     parser.add_argument(
         "--exclude-verdicts",
-        default="confirmed_attack",
+        default="confirmed_attack,rule_match",
         metavar="LIST",
         help="Comma-separated Mantis 'ML Verdict' values whose rows are dropped "
-        "during preprocessing (default: confirmed_attack; 'none' keeps every "
+        "during preprocessing (default: confirmed_attack,rule_match; 'none' keeps every "
         "row). Only affects CSVs that have the column. Use 'none' when "
         "preprocessing data for --score, to compare against the live alert rate",
     )

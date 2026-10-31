@@ -120,17 +120,24 @@ chmod +x main.py
 | `-dp, --datapreprocess` | Run data preprocessing |
 | `-da, --deepautoencoder` | Train LSTM Autoencoder |
 | `-ep, --export` | Export model to ONNX |
-| `--exclude-verdicts` | Mantis `ML Verdict` values whose rows are dropped during preprocessing (default `confirmed_attack`; `none` keeps every row). See [Mantis-recorded data](#mantis-recorded-data) |
+| `--exclude-verdicts` | Mantis `ML Verdict` values whose rows are dropped during preprocessing (default `confirmed_attack,rule_match`; `none` keeps every row). See [Mantis-recorded data](#mantis-recorded-data) |
 
 ### Mantis-recorded data
 
 Traffic CSVs recorded by Mantis carry an `ML Verdict` column next to `Label` (which is always `BENIGN`):
-`normal`, `anomaly`, `confirmed_attack`, `suppressed` or `uninspected`. Preprocessing logs the verdict
-distribution per dataset and drops the rows listed in `--exclude-verdicts`.
+`normal`, `anomaly`, `rule_match`, `structural`, `confirmed_attack`, `suppressed` or `uninspected`.
+Preprocessing logs the verdict distribution per dataset and drops the rows listed in `--exclude-verdicts`.
 
-The default drops only `confirmed_attack`: anomalies that Mantis backed with evidence outside the model (a
-Suricata rule match or a FLOOD / SCAN / TARGETED aggregator verdict). Plain `anomaly` rows are kept on
-purpose. The live threshold flags a fixed share of benign traffic by definition, so dropping every anomaly
+| Verdict | Evidence beyond the model |
+|---------|---------------------------|
+| `rule_match` | Suricata rule match |
+| `structural` | Aggregator FLOOD / SCAN / TARGETED verdict |
+| `confirmed_attack` | Both |
+
+The default drops `confirmed_attack` and `rule_match`. `structural` rows are kept: the aggregator heuristics
+count per source across all destinations, so a busy client's ordinary egress (many HTTPS sites, DNS, push
+services) trips them too; add `structural` to the list once those heuristics are trusted. Plain `anomaly` rows
+are kept on purpose. The live threshold flags a fixed share of benign traffic by definition, so dropping every anomaly
 would trim the benign tail on each retrain and narrow the model every cycle. `suppressed` rows were confirmed
 as false positives by an operator and are benign.
 
@@ -191,7 +198,7 @@ docker run --ipc=host --gpus all \
 | `SCORE` | Score all preprocessed benign data with a finished model (`true` = `artifacts/`, or a model directory) and its saved thresholds, no training — compare with Mantis' live alert rate on the same period |
 | `THRESHOLD` | Threshold for `FEATUREANALYSIS` / `SCORE` reports, e.g. `p95`, `p99.5`, `p99.9` (default `p99`) |
 | `FEATUREANALYSIS` | Per-feature error analysis of the trained model in `artifacts/`, no retraining (`true`/`false`) |
-| `EXCLUDE_VERDICTS` | Same as `--exclude-verdicts` (default `confirmed_attack`) |
+| `EXCLUDE_VERDICTS` | Same as `--exclude-verdicts` (default `confirmed_attack,rule_match`) |
 
 ### Build Docker Image Locally
 
