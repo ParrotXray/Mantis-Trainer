@@ -16,6 +16,10 @@ SEQUENCE_META_COLUMNS: Final[List[str]] = ["timestamp", "src_ip"]
 # drained, i.e. the order live inference buffers flows per src_ip).
 # Optional: windows fall back to "timestamp" order when it is absent.
 FLOW_ORDER_COLUMN: Final[str] = "flow_seq"
+# Mantis's own judgement of each flow at capture time (normal, anomaly,
+# confirmed_attack, suppressed, uninspected). Only present in CSVs recorded
+# by a Mantis that writes it; Label stays BENIGN regardless.
+ML_VERDICT_COLUMN: Final[str] = "ML Verdict"
 # Kept in the parquet for analysis only (where false positives go); never
 # model inputs.
 ANALYSIS_META_COLUMNS: Final[List[str]] = ["dst_ip", "dst_port"]

@@ -9,6 +9,7 @@ from datetime import timedelta
 from components import DataPreprocess, DeepAutoencoder, Exporter
 from model import (
     DeepAutoencoderConfig,
+    PreprocessConfig,
     download_dataset,
     get_dataset_config,
     list_available_datasets,
@@ -49,6 +50,10 @@ Examples:
   python main.py --finetune                 # Finetune ./artifacts model on newer data
   python main.py --finetune ./old_model       # Finetune a model from another dir
   python main.py --score --threshold p95      # Score loaded data with ./artifacts model
+
+  # Mantis-recorded CSVs: choose which "ML Verdict" rows to drop
+  python main.py -s xxx/xxx-dataset -a --exclude-verdicts confirmed_attack,anomaly
+  python main.py -s xxx/xxx-dataset -a --exclude-verdicts none
 
 Available datasets: {', '.join(available)}
         """,
@@ -118,6 +123,16 @@ Available datasets: {', '.join(available)}
     )
 
     parser.add_argument(
+        "--exclude-verdicts",
+        default="confirmed_attack",
+        metavar="LIST",
+        help="Comma-separated Mantis 'ML Verdict' values whose rows are dropped "
+        "during preprocessing (default: confirmed_attack; 'none' keeps every "
+        "row). Only affects CSVs that have the column. Use 'none' when "
+        "preprocessing data for --score, to compare against the live alert rate",
+    )
+
+    parser.add_argument(
         "--resume",
         default=None,
         help="Resume training from checkpoint (e.g. ./artifacts/autoencoder_temp-v14.ckpt)",
@@ -175,8 +190,17 @@ Available datasets: {', '.join(available)}
 
         log.info(f"Datasets: {', '.join(dataset_names)}")
 
+        exclude_verdicts = tuple(
+            v.strip()
+            for v in args.exclude_verdicts.split(",")
+            if v.strip() and v.strip().lower() != "none"
+        )
+        preprocess_config = PreprocessConfig(exclude_verdicts=exclude_verdicts)
+
         with pipeline_stage("Data Preprocessing"):
-            with DataPreprocess(dataset_configs, dataset_paths) as dp:
+            with DataPreprocess(
+                dataset_configs, dataset_paths, preprocess_config
+            ) as dp:
                 dp.load_datasets()
                 dp.statistics_dataset()
                 dp.feature_preparation()

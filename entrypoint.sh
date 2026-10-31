@@ -28,6 +28,7 @@ elif [ -n "$SCORE" ] && [ "$SCORE" != "false" ]; then
     CMD="$CMD --score $SCORE"
 fi
 [ -n "$THRESHOLD" ] && CMD="$CMD --threshold $THRESHOLD"
+[ -n "$EXCLUDE_VERDICTS" ] && CMD="$CMD --exclude-verdicts $EXCLUDE_VERDICTS"
 [ -n "$RESUME" ] && CMD="$CMD --resume $RESUME"
 
 exec $CMD "$@"

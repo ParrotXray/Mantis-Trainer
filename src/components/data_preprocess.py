@@ -9,6 +9,7 @@ import ujson
 from model import (
     ANALYSIS_META_COLUMNS,
     FLOW_ORDER_COLUMN,
+    ML_VERDICT_COLUMN,
     SEQUENCE_META_COLUMNS,
     UNIFIED_FEATURE_NAMES,
     DataPreprocessingError,
@@ -165,6 +166,29 @@ class DataPreprocess:
 
         return frames
 
+    def _drop_excluded_verdicts(self, df: pd.DataFrame, name: str) -> pd.DataFrame:
+        # Datasets not recorded by Mantis (or by an older Mantis) have no
+        # verdict column and are left untouched.
+        if ML_VERDICT_COLUMN not in df.columns:
+            return df
+
+        verdicts = df[ML_VERDICT_COLUMN].astype(str).str.strip()
+        self.log.info(
+            f"{name}: {ML_VERDICT_COLUMN} distribution:\n"
+            f"{verdicts.value_counts().to_string()}"
+        )
+
+        excluded = verdicts.isin(self.config.exclude_verdicts)
+        if not excluded.any():
+            return df
+        self.log.info(
+            f"{name}: dropping {int(excluded.sum()):,} rows with "
+            f"{ML_VERDICT_COLUMN} in {list(self.config.exclude_verdicts)}"
+        )
+        # _file_row keeps each surviving row's original position, so the
+        # drain order rebuilt later still reflects what Mantis saw live.
+        return df[~excluded].reset_index(drop=True)
+
     def load_datasets(self) -> None:
         all_frames: List[pd.DataFrame] = []
 
@@ -189,6 +213,9 @@ class DataPreprocess:
             self.log.info(
                 f"{ds_config.kaggle_dataset_id}: {len(combined_raw):,} rows, "
                 f"{combined_raw.shape[1]} columns"
+            )
+            combined_raw = self._drop_excluded_verdicts(
+                combined_raw, ds_config.kaggle_dataset_id
             )
 
             # Extract labels BEFORE column mapping (uses original column names)
@@ -340,7 +367,10 @@ class DataPreprocess:
         stats = df.groupby("file", sort=False)["ts"].quantile([0.25, 0.5, 0.75])
         stats = stats.unstack()
         stats.columns = ["p25", "p50", "p75"]
-        stats["n"] = df.groupby("file", sort=False).size()
+        # Span of row positions, not row count: rows may have been dropped
+        # (excluded verdicts), and a count would let the next file's offset
+        # land inside this file's surviving positions.
+        stats["n"] = df.groupby("file", sort=False)["row"].max() + 1
         stats = stats.sort_values("p50", na_position="last", kind="stable")
 
         # Files written one after another barely overlap (only long flows

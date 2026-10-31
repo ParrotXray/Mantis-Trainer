@@ -1,6 +1,7 @@
 from .dataset_config import (
     ANALYSIS_META_COLUMNS,
     FLOW_ORDER_COLUMN,
+    ML_VERDICT_COLUMN,
     SEQUENCE_META_COLUMNS,
     UNIFIED_FEATURE_NAMES,
     DatasetConfig,
@@ -33,6 +34,7 @@ __all__ = (
     "UNIFIED_FEATURE_NAMES",
     "ANALYSIS_META_COLUMNS",
     "FLOW_ORDER_COLUMN",
+    "ML_VERDICT_COLUMN",
     "SEQUENCE_META_COLUMNS",
     "UnsupportedDatasetError",
     "UnavailableDatasetError",
