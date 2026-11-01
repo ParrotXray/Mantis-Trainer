@@ -145,6 +145,15 @@ Dropped rows keep their original position in the drain order (`flow_seq`), so wi
 follow the order Mantis saw live. Datasets without the column are not affected. When preprocessing data for
 `--score`, use `--exclude-verdicts none` so the comparison with the live alert rate covers the same flows.
 
+The verdict is also kept in the preprocessed data as `ml_verdict` (analysis only, never a model input), and
+`--score` reports each verdict's window count, median score and share over the threshold. A window is labelled
+with the verdict of its last flow, the one Mantis scored live. To check that a retrain learned the flows an
+operator marked as false positives, score the same period with the model before (finetuning backs it up to
+`artifacts/pretrained_<time>/`) and after: the `suppressed` share over the threshold should drop, and the
+`normal` share should not rise. Flows of the same kind recorded before the suppression rule existed are still
+labelled `anomaly`, so the `suppressed` row undercounts them. Data preprocessed before this change has no
+`ml_verdict`; rerun `-dp`.
+
 ## Threshold Selection
 
 After training, the pipeline prints a threshold analysis table derived from the **BENIGN-only validation set** (no attack labels involved):

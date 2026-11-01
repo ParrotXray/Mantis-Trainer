@@ -1065,6 +1065,45 @@ class DeepAutoencoder:
                 f"{r['sum'] / r['size']:>9.2%}"
             )
         self.log.info("\n".join(lines))
+        self._score_by_verdict(scores, rows, name, threshold)
+
+    def _score_by_verdict(
+        self, scores: np.ndarray, rows: np.ndarray, name: str, threshold: float
+    ) -> None:
+        # A window is labelled with the verdict of its last flow, the flow
+        # Mantis scored live. Scoring the same period with the model before
+        # and after a retrain shows whether it learned what an operator
+        # marked as false positives: the "suppressed" share over the
+        # threshold should drop, while "normal" should not rise.
+        if "ml_verdict" not in self.test_df.columns:
+            self.log.info(
+                "\nNo ML Verdict column in the data (not recorded by Mantis, or "
+                "preprocessed before it was kept) — no per-verdict breakdown"
+            )
+            return
+        verdicts = (
+            self.test_df["ml_verdict"]
+            .fillna("(none)")
+            .astype(str)
+            .str.strip()
+            .replace({"nan": "(none)", "<NA>": "(none)", "": "(none)"})
+            .to_numpy(dtype=object)[rows]
+        )
+        by_verdict = (
+            pd.DataFrame({"verdict": verdicts, "score": scores, "fp": scores > threshold})
+            .groupby("verdict", sort=True)
+            .agg(windows=("score", "size"), median=("score", "median"), fp=("fp", "sum"))
+        )
+        lines = [
+            f"\nBenign windows by ML Verdict @ {name}={threshold:.6f}:",
+            f"  {'Verdict':<17} {'Windows':>9} {'Median':>10} {'Over':>8} {'Over %':>8}",
+        ]
+        for verdict, r in by_verdict.iterrows():
+            lines.append(
+                f"  {verdict:<17} {int(r['windows']):>9,} {r['median']:>10.6f} "
+                f"{int(r['fp']):>8,} {r['fp'] / r['windows']:>8.2%}"
+            )
+        self.log.info("\n".join(lines))
 
     def match_trained_split(self, model_dir: str = "./artifacts") -> None:
         # For -fa on a finetuned model: use its frozen preprocessing (refitting

@@ -24,7 +24,10 @@ ML_VERDICT_COLUMN: Final[str] = "ML Verdict"
 # model inputs.
 # "direction" is Mantis's capture side of the flow's initiator: egress =
 # started from the internal network, ingress = started from outside.
-ANALYSIS_META_COLUMNS: Final[List[str]] = ["dst_ip", "dst_port", "direction"]
+# "ml_verdict" is ML_VERDICT_COLUMN after mapping; --score breaks its report
+# down by it, e.g. to check that a retrained model stops flagging flows an
+# operator marked as false positives (suppressed).
+ANALYSIS_META_COLUMNS: Final[List[str]] = ["dst_ip", "dst_port", "direction", "ml_verdict"]
 
 UNIFIED_FEATURE_NAMES: Final[List[str]] = [
     "flow_duration",
@@ -193,6 +196,7 @@ _EXTENDED_COLUMN_MAPPING: Final[Dict[str, str]] = {
     "Packet Length Mean": "pkt_len_mean",
     "Destination Port": "dst_port",
     "Direction": "direction",
+    "ML Verdict": "ml_verdict",
     "Protocol": "protocol",
     "PSH Flag Count": "psh_flag_cnt",
     "ACK Flag Count": "ack_flag_cnt",
