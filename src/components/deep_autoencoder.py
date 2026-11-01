@@ -1090,9 +1090,13 @@ class DeepAutoencoder:
             .to_numpy(dtype=object)[rows]
         )
         by_verdict = (
-            pd.DataFrame({"verdict": verdicts, "score": scores, "fp": scores > threshold})
+            pd.DataFrame(
+                {"verdict": verdicts, "score": scores, "fp": scores > threshold}
+            )
             .groupby("verdict", sort=True)
-            .agg(windows=("score", "size"), median=("score", "median"), fp=("fp", "sum"))
+            .agg(
+                windows=("score", "size"), median=("score", "median"), fp=("fp", "sum")
+            )
         )
         lines = [
             f"\nBenign windows by ML Verdict @ {name}={threshold:.6f}:",

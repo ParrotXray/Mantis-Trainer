@@ -27,7 +27,12 @@ ML_VERDICT_COLUMN: Final[str] = "ML Verdict"
 # "ml_verdict" is ML_VERDICT_COLUMN after mapping; --score breaks its report
 # down by it, e.g. to check that a retrained model stops flagging flows an
 # operator marked as false positives (suppressed).
-ANALYSIS_META_COLUMNS: Final[List[str]] = ["dst_ip", "dst_port", "direction", "ml_verdict"]
+ANALYSIS_META_COLUMNS: Final[List[str]] = [
+    "dst_ip",
+    "dst_port",
+    "direction",
+    "ml_verdict",
+]
 
 UNIFIED_FEATURE_NAMES: Final[List[str]] = [
     "flow_duration",
