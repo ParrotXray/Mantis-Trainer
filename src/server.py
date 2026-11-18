@@ -5,7 +5,8 @@ import sys
 
 import uvicorn
 
-from api import ApiSettings, SettingsError, create_app
+from api import ApiSettings, create_app
+from model.error import SettingsError
 from utils import Logger
 
 if __name__ == "__main__":
