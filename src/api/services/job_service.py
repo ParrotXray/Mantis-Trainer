@@ -4,9 +4,9 @@ import uuid
 from pathlib import Path
 from typing import List, Optional
 
+from model.error import JobConflictError
 from utils import Logger
 
-from model.error import JobConflictError
 from ..schemas import (
     JobPlan,
     JobRequest,

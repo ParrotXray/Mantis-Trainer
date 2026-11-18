@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import AsyncIterator, Callable, List, Optional
 
 from model.error import ResourceNotFoundError
+
 from ..schemas import FileInfo, LogContent
 from .path_guard import resolve_within
 
