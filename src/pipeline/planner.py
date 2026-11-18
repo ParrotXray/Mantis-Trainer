@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Final, List, Optional
+from typing import Callable, Final, List, Optional
 
 from model.error import PipelineError
 from utils import IpFilter
@@ -21,11 +21,13 @@ class PipelinePlanner:
         self,
         pool: CsvPool,
         parser: ArgsParser,
+        accept_path: Callable[[str, str], str] | None = None,
     ) -> None:
         self.pool = pool
         self.parser = parser
+        self._accept_path = accept_path or self._default_accept_path
 
-    def _accept_path(self, value: str, _: str) -> str:
+    def _default_accept_path(self, value: str, _: str) -> str:
         return value
 
     def _data_files(self, stages: List[Stage]) -> List[str]:

@@ -17,7 +17,7 @@ from .path_guard import resolve_inside
 class JobSpecFactory:
     def __init__(self, settings: ApiSettings, pool: CsvPool) -> None:
         self.settings = settings
-        self.planner = PipelinePlanner(pool, ArgsParser(), self._inside_workspace)
+        self.planner = PipelinePlanner(pool, ArgsParser(), accept_path=self._inside_workspace)
 
     def _inside_workspace(self, value: str, label: str) -> str:
         return str(resolve_inside(self.settings.workspace, value, label))
