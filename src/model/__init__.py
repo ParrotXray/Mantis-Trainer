@@ -18,6 +18,15 @@ from .error import (
     TrainingError,
     UnavailableDatasetError,
     UnsupportedDatasetError,
+    SettingsError,
+    ApiError,
+    UnauthorizedError,
+    InvalidNameError,
+    InvalidParameterError,
+    ResourceNotFoundError,
+    JobConflictError,
+    PayloadTooLargeError,
+    StorageError,
 )
 from .export_config import ExportConfig
 from .preprocess_config import PreprocessConfig
@@ -43,4 +52,13 @@ __all__ = (
     "ExportError",
     "LoadingConfigFailed",
     "PipelineError",
+    "SettingsError",
+    "ApiError",
+    "UnauthorizedError",
+    "InvalidNameError",
+    "InvalidParameterError",
+    "ResourceNotFoundError",
+    "JobConflictError",
+    "PayloadTooLargeError",
+    "StorageError",
 )

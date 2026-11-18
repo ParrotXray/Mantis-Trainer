@@ -6,7 +6,7 @@ from typing import List, Optional
 
 from utils import Logger
 
-from ..errors import JobConflictError
+from model.error import JobConflictError
 from ..schemas import (
     JobPlan,
     JobRequest,

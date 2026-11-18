@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Optional, Tuple
 
-from .errors import SettingsError
+from model.error import SettingsError
 
 MIN_TOKEN_LENGTH: Final[int] = 16
 

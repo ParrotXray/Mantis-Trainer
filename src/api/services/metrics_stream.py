@@ -3,7 +3,7 @@ from typing import AsyncIterator
 
 from starlette.concurrency import run_in_threadpool
 
-from ..errors import InvalidParameterError
+from model.error import InvalidParameterError
 from ..schemas import SystemMetrics
 from .system_monitor import SystemMonitor
 

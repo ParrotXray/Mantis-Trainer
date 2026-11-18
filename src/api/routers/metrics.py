@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, Query, WebSocket, status
 
 from ..dependencies import get_metrics_stream, get_monitor
-from ..errors import InvalidParameterError
+from model.error import InvalidParameterError
 from ..schemas import CpuMetrics, GpuMetrics, MemoryMetrics, SystemMetrics
 from ..services import MetricsStream, SystemMonitor
 from .ws_session import WsSession

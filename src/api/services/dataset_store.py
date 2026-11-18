@@ -7,7 +7,7 @@ from fastapi import UploadFile
 
 from pipeline import CsvPool
 
-from ..errors import InvalidNameError, PayloadTooLargeError, StorageError
+from model.error import InvalidNameError, PayloadTooLargeError, StorageError
 from ..schemas import DatasetFile, DatasetInventory
 from .name_validator import validate_name
 from .path_guard import resolve_within

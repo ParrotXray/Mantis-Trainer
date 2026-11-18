@@ -1,11 +1,12 @@
 import secrets
 
+from typing import Final
 from fastapi import WebSocketException, status
 from starlette.requests import HTTPConnection
 
-from .errors import UnauthorizedError
+from model.error import UnauthorizedError
 
-_BEARER = "bearer"
+_BEARER: Final[str] = "bearer"
 
 
 class TokenGuard:

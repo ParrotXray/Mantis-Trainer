@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Protocol
 
 from pipeline import Stage
 
-from ..errors import ResourceNotFoundError
+from model.error import ResourceNotFoundError
 from ..schemas import JobStatus
 
 

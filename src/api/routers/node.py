@@ -7,7 +7,7 @@ from starlette.concurrency import run_in_threadpool
 from pipeline import PIPELINE_ORDER
 
 from ..dependencies import get_job_service, get_metrics_stream, get_settings
-from ..errors import InvalidParameterError
+from model.error import InvalidParameterError
 from ..schemas import NodeInfo, NodeSnapshot
 from ..services import JobService, MetricsStream
 from ..settings import ApiSettings

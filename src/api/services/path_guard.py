@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from ..errors import InvalidNameError, ResourceNotFoundError
+from model.error import InvalidNameError, ResourceNotFoundError
 
 
 def resolve_inside(base: Path, relative: str, label: str = "path") -> Path:

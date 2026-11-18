@@ -1,9 +1,9 @@
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 
-from pipeline import PipelineError
+from model.error import PipelineError
 
-from .errors import ApiError
+from model.error import ApiError
 
 
 async def _handle_api_error(_: Request, exc: ApiError) -> JSONResponse:
