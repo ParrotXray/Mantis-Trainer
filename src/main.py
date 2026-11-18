@@ -74,7 +74,9 @@ def main() -> None:
     if not stages:
         parser.print_help()
         return
-    planner = PipelinePlanner(CsvPool(CsvPool.default_data_root()), ArgsParser(), accept_path=None)
+    planner = PipelinePlanner(
+        CsvPool(CsvPool.default_data_root()), ArgsParser(), accept_path=None
+    )
     try:
         options = planner.plan(PipelineRequest(stages=stages, args=args.args))
     except PipelineError as exc:
