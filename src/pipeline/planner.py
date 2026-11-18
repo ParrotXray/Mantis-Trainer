@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import List, Optional, Final
+from typing import Final, List, Optional
 
 from model.error import PipelineError
 from utils import IpFilter
@@ -7,7 +7,6 @@ from utils import IpFilter
 from .args_parser import SECTIONS, ArgsParser
 from .config_builder import ConfigBuilder
 from .csv_pool import CsvPool
-
 from .options import PipelineOptions
 from .request import PipelineRequest
 from .stage import MODEL_STAGES, Stage, StagePlanner
