@@ -7,6 +7,9 @@ import pandas as pd
 import ujson
 
 from model import (
+    ANALYSIS_META_COLUMNS,
+    FLOW_ORDER_COLUMN,
+    ML_VERDICT_COLUMN,
     SEQUENCE_META_COLUMNS,
     UNIFIED_FEATURE_NAMES,
     DataPreprocessingError,
@@ -14,7 +17,7 @@ from model import (
     DatasetLoadingError,
     PreprocessConfig,
 )
-from utils import Logger
+from utils import IpFilter, Logger
 
 
 class DataPreprocess:
@@ -152,6 +155,10 @@ class DataPreprocess:
                         low_memory=False,
                     )
                 df.columns = df.columns.str.strip()
+                # Row order within a file is drain order; kept so
+                # feature_preparation can rebuild FLOW_ORDER_COLUMN.
+                df["_file_key"] = str(csv_path)
+                df["_file_row"] = np.arange(len(df), dtype=np.int64)
                 frames.append(df)
                 self.log.info(f"{csv_path.name} Shape: {df.shape}")
             except Exception as e:
@@ -159,13 +166,70 @@ class DataPreprocess:
 
         return frames
 
+    def _drop_excluded_verdicts(self, df: pd.DataFrame, name: str) -> pd.DataFrame:
+        # Datasets not recorded by Mantis (or by an older Mantis) have no
+        # verdict column and are left untouched.
+        if ML_VERDICT_COLUMN not in df.columns:
+            return df
+
+        verdicts = df[ML_VERDICT_COLUMN].astype(str).str.strip()
+        self.log.info(
+            f"{name}: {ML_VERDICT_COLUMN} distribution:\n"
+            f"{verdicts.value_counts().to_string()}"
+        )
+
+        excluded = verdicts.isin(self.config.exclude_verdicts)
+        if not excluded.any():
+            return df
+        self.log.info(
+            f"{name}: dropping {int(excluded.sum()):,} rows with "
+            f"{ML_VERDICT_COLUMN} in {list(self.config.exclude_verdicts)}"
+        )
+        # _file_row keeps each surviving row's original position, so the
+        # drain order rebuilt later still reflects what Mantis saw live.
+        return df[~excluded].reset_index(drop=True)
+
+    def _drop_excluded_ips(
+        self, df: pd.DataFrame, ds_config: DatasetConfig, name: str
+    ) -> pd.DataFrame:
+        rules = (
+            ("src_ip", "exclude_src_ips", "source"),
+            ("dst_ip", "exclude_dst_ips", "destination"),
+        )
+        for unified, key, side in rules:
+            ip_filter = IpFilter.from_values(getattr(self.config, key))
+            if not ip_filter:
+                continue
+            columns = [
+                raw
+                for raw, mapped in ds_config.column_mapping.items()
+                if mapped == unified and raw in df.columns
+            ]
+            if not columns:
+                self.log.warning(
+                    f"{name}: dp.{key} is set but the data has no {side} IP column; "
+                    f"nothing excluded"
+                )
+                continue
+            mask, report = ip_filter.match(df[columns[0]])
+            for network, (rows, hosts) in report.items():
+                self.log.info(
+                    f"{name}: dp.{key} {network}: {rows:,} rows from {hosts} "
+                    f"{side} address(es) excluded"
+                )
+                if rows == 0:
+                    self.log.warning(
+                        f"{name}: dp.{key} {network} matched no {side} IP in the data"
+                    )
+            if mask.any():
+                df = df[~mask].reset_index(drop=True)
+        return df
+
     def load_datasets(self) -> None:
         all_frames: List[pd.DataFrame] = []
 
         for ds_config, path in zip(self.dataset_configs, self.paths):
-            self.log.info(
-                f"Loading dataset '{ds_config.kaggle_dataset_id}' from {path}..."
-            )
+            self.log.info(f"Loading dataset '{ds_config.name}' from {path}...")
 
             raw_frames = self._load_csv_files(
                 path,
@@ -174,16 +238,23 @@ class DataPreprocess:
                 ds_config.header_name_column,
             )
             if not raw_frames:
-                self.log.warning(
-                    f"No CSV files found for '{ds_config.kaggle_dataset_id}' at {path}"
-                )
+                self.log.warning(f"No CSV files found for '{ds_config.name}' at {path}")
                 continue
 
             combined_raw = pd.concat(raw_frames, ignore_index=True)
             self.log.info(
-                f"{ds_config.kaggle_dataset_id}: {len(combined_raw):,} rows, "
+                f"{ds_config.name}: {len(combined_raw):,} rows, "
                 f"{combined_raw.shape[1]} columns"
             )
+            combined_raw = self._drop_excluded_verdicts(combined_raw, ds_config.name)
+            combined_raw = self._drop_excluded_ips(
+                combined_raw, ds_config, ds_config.name
+            )
+            if "Direction" in combined_raw.columns:
+                self.log.info(
+                    f"{ds_config.name}: Direction distribution:\n"
+                    f"{combined_raw['Direction'].astype(str).str.strip().value_counts().to_string()}"
+                )
 
             # Extract labels BEFORE column mapping (uses original column names)
             labels = ds_config.extract_labels(combined_raw)
@@ -194,7 +265,7 @@ class DataPreprocess:
             mapped = ds_config.compute_derived(mapped)
 
             mapped["_label"] = labels.values
-            mapped["_source"] = ds_config.kaggle_dataset_id
+            mapped["_source"] = ds_config.name
 
             all_frames.append(mapped)
 
@@ -285,12 +356,30 @@ class DataPreprocess:
             else:
                 self.feature_matrix[meta_col] = self.combined_data[meta_col].values
 
+        for meta_col in ANALYSIS_META_COLUMNS:
+            if meta_col in self.combined_data.columns:
+                self.feature_matrix[meta_col] = (
+                    self.combined_data[meta_col].astype(str).str.strip().values
+                )
+
+        if (
+            "_file_key" in self.combined_data.columns
+            and "timestamp" in self.feature_matrix.columns
+        ):
+            self.feature_matrix[FLOW_ORDER_COLUMN] = self._drain_order(
+                self.combined_data["_file_key"],
+                self.combined_data["_file_row"],
+                self.feature_matrix["timestamp"],
+            )
+
         n_feature_cols = len(UNIFIED_FEATURE_NAMES)
         n_total = self.feature_matrix[UNIFIED_FEATURE_NAMES].size
         n_nan = self.feature_matrix[UNIFIED_FEATURE_NAMES].isna().sum().sum()
         pct_nan = n_nan / n_total * 100 if n_total > 0 else 0
         meta_present = [
-            c for c in SEQUENCE_META_COLUMNS if c in self.feature_matrix.columns
+            c
+            for c in SEQUENCE_META_COLUMNS + [FLOW_ORDER_COLUMN] + ANALYSIS_META_COLUMNS
+            if c in self.feature_matrix.columns
         ]
         self.log.info(
             f"Feature matrix: {self.feature_matrix.shape} "
@@ -299,6 +388,57 @@ class DataPreprocess:
         )
         if meta_present:
             self.log.info(f"Sequence metadata preserved: {meta_present}")
+
+    def _drain_order(
+        self, file_key: pd.Series, file_row: pd.Series, timestamp: pd.Series
+    ) -> np.ndarray:
+        # Global drain order: row order within each file (Mantis writes a
+        # row per drained flow), files ordered by their median flow start
+        # time — not by file name, which may not sort chronologically.
+        df = pd.DataFrame(
+            {
+                "file": file_key.values,
+                "row": file_row.values,
+                "ts": timestamp.where(timestamp >= 0).values,
+            }
+        )
+        stats = df.groupby("file", sort=False)["ts"].quantile([0.25, 0.5, 0.75])
+        stats = stats.unstack()
+        stats.columns = ["p25", "p50", "p75"]
+        # Span of row positions, not row count: rows may have been dropped
+        # (excluded verdicts), and a count would let the next file's offset
+        # land inside this file's surviving positions.
+        stats["n"] = df.groupby("file", sort=False)["row"].max() + 1
+        stats = stats.sort_values("p50", na_position="last", kind="stable")
+
+        # Files written one after another barely overlap (only long flows
+        # straddle a rotation); bulk overlap means concurrent writers, whose
+        # rows cannot be merged into one drain order by row position.
+        overlapping = [
+            (a, b)
+            for a, b in zip(stats.index[:-1], stats.index[1:])
+            if stats.at[a, "p75"] > stats.at[b, "p25"]
+        ]
+        if overlapping:
+            self.log.warning(
+                f"{len(overlapping)} pair(s) of CSV files overlap in time "
+                "(written concurrently?); flow_seq order across them is "
+                "unreliable:\n"
+                + "\n".join(
+                    f"  {Path(a).name} <-> {Path(b).name}" for a, b in overlapping
+                )
+            )
+
+        offsets = pd.Series(
+            np.concatenate([[0], np.cumsum(stats["n"].values[:-1])]),
+            index=stats.index,
+        )
+        self.log.info(
+            f"Drain order (flow_seq) built from {len(stats)} file(s), "
+            f"ordered by median timestamp: "
+            f"{[Path(f).name for f in stats.index]}"
+        )
+        return (df["file"].map(offsets).values + df["row"].values).astype(np.int64)
 
     def output_result(self) -> None:
         if self.feature_matrix is None or self.labels is None:
@@ -352,7 +492,7 @@ class DataPreprocess:
             "total_features": len(UNIFIED_FEATURE_NAMES),
             "benign_samples": len(output_benign),
             "attack_samples": len(output_attack),
-            "datasets": [cfg.kaggle_dataset_id for cfg in self.dataset_configs],
+            "datasets": [cfg.name for cfg in self.dataset_configs],
             "label_distribution": self.labels.value_counts().to_dict(),
         }
 

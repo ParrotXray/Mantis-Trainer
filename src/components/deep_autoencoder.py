@@ -1,4 +1,6 @@
+import gc
 import os
+import shutil
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -30,6 +32,8 @@ from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 
 from model import (
+    ANALYSIS_META_COLUMNS,
+    FLOW_ORDER_COLUMN,
     SEQUENCE_META_COLUMNS,
     UNIFIED_FEATURE_NAMES,
     DeepAutoencoderConfig,
@@ -173,20 +177,24 @@ class LSTMAutoencoderLightningModule(L.LightningModule):
         self,
         model: LSTMAutoencoderModel,
         learning_rate: float = 0.001,
+        weight_decay: float = 1e-5,
         clipnorm: float = 1.0,
         reduce_lr_factor: float = 0.5,
         reduce_lr_patience: int = 5,
         min_lr: float = 1e-7,
         latent_norm_weight: float = 0.0,
+        reduce_lr_min_delta: float = 0.0,
     ):
         super().__init__()
         self.model = model
         self.learning_rate = learning_rate
+        self.weight_decay = weight_decay
         self.clipnorm = clipnorm
         self.reduce_lr_factor = reduce_lr_factor
         self.reduce_lr_patience = reduce_lr_patience
         self.min_lr = min_lr
         self.latent_norm_weight = latent_norm_weight
+        self.reduce_lr_min_delta = reduce_lr_min_delta
         self.loss_fn = nn.MSELoss()
         self.save_hyperparameters(ignore=["model"])
 
@@ -226,9 +234,10 @@ class LSTMAutoencoderLightningModule(L.LightningModule):
         return loss
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(
+        optimizer = torch.optim.AdamW(
             self.parameters(),
             lr=self.learning_rate,
+            weight_decay=self.weight_decay,
         )
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
@@ -236,6 +245,11 @@ class LSTMAutoencoderLightningModule(L.LightningModule):
             factor=self.reduce_lr_factor,
             patience=self.reduce_lr_patience,
             min_lr=self.min_lr,
+            # Same absolute bar as early stopping: PyTorch's default relative
+            # 1e-4 (~3e-7 at a ~3e-3 loss) let noise-level new bests reset
+            # patience, so lr never dropped before early stopping fired.
+            threshold=self.reduce_lr_min_delta,
+            threshold_mode="abs",
         )
         return {
             "optimizer": optimizer,
@@ -248,38 +262,84 @@ class LSTMAutoencoderLightningModule(L.LightningModule):
         }
 
 
-def _make_train_sequences(
+# Val-percentile thresholds: p90..p99, plus stricter p99.5 / p99.9 for
+# deployments where drift pushes test FPR above val's nominal rate.
+THRESHOLD_PERCENTILES = [*range(90, 100), 99.5, 99.9]
+
+
+def _percentile_name(p: float) -> str:
+    return f"p{p:g}"
+
+
+def _fmt_utc(ms: float) -> str:
+    return pd.to_datetime(int(ms), unit="ms", utc=True).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _rate(mask: np.ndarray) -> float:
+    return float(mask.mean()) if len(mask) else float("nan")
+
+
+def _pct(x: float) -> str:
+    return "n/a" if np.isnan(x) else f"{x:.2%}"
+
+
+def _order_column(df: pd.DataFrame) -> str:
+    # Windows follow drain order (what live inference buffers per src_ip);
+    # parquet built before flow_seq existed falls back to flow start time.
+    return FLOW_ORDER_COLUMN if FLOW_ORDER_COLUMN in df.columns else "timestamp"
+
+
+def _window_fill(df: pd.DataFrame, window_size: int) -> np.ndarray:
+    # How many real (non-padded) flows the per-flow window ending at each row
+    # holds. Live inference skips windows below window_size (zero padding is
+    # out of distribution), so thresholds and evaluation must too.
+    if all(c in df.columns for c in SEQUENCE_META_COLUMNS):
+        order = _order_column(df)
+        rank = (
+            df[["src_ip", order]]
+            .groupby("src_ip", sort=False)[order]
+            .rank(method="first")
+            .values
+        )
+    else:
+        rank = np.arange(1, len(df) + 1)
+    return np.minimum(rank, window_size).astype(np.int64)
+
+
+def _train_window_index(
     df: pd.DataFrame,
-    scaled: np.ndarray,
+    n_rows: int,
     window_size: int,
     stride: int,
 ) -> np.ndarray:
-    n_features = scaled.shape[1]
-    has_meta = all(c in df.columns for c in SEQUENCE_META_COLUMNS)
+    # Row positions of every training window, one row per window. Gathering
+    # the windows once from this index keeps a single float32 copy of them
+    # in memory, instead of a list of slices stacked as float64 and cast.
+    offsets = np.arange(window_size)
+    parts: List[np.ndarray] = []
 
-    sequences: List[np.ndarray] = []
-
-    if has_meta:
-        tmp = df[["src_ip", "timestamp"]].copy()
+    if all(c in df.columns for c in SEQUENCE_META_COLUMNS):
+        order = _order_column(df)
+        tmp = df[["src_ip", order]].copy()
         tmp["_pos"] = range(len(df))
         for _, group in tmp.groupby("src_ip", sort=False):
-            group_sorted = group.sort_values("timestamp")
+            group_sorted = group.sort_values(order, kind="stable")
             positions = group_sorted["_pos"].values
-            n = len(positions)
-            for start in range(0, n - window_size + 1, stride):
-                sequences.append(scaled[positions[start : start + window_size]])
+            starts = np.arange(0, len(positions) - window_size + 1, stride)
+            if len(starts):
+                parts.append(positions[starts[:, None] + offsets])
     else:
-        n = len(scaled)
-        for start in range(0, n - window_size + 1, stride):
-            sequences.append(scaled[start : start + window_size])
+        starts = np.arange(0, n_rows - window_size + 1, stride)
+        if len(starts):
+            parts.append(starts[:, None] + offsets)
 
-    if not sequences:
-        return np.empty((0, window_size, n_features), dtype=np.float32)
-    return np.stack(sequences).astype(np.float32)
+    if not parts:
+        return np.empty((0, window_size), dtype=np.intp)
+    return np.concatenate(parts).astype(np.intp, copy=False)
 
 
-def _make_synthetic_sequences(
-    scaled: np.ndarray,
+def _synthetic_window_index(
+    n_rows: int,
     window_size: int,
     n_synthetic: int,
     rng: np.random.Generator,
@@ -291,41 +351,61 @@ def _make_synthetic_sequences(
     training beyond whatever happened to co-occur in the captured order —
     train-only, never used for val/test.
     """
-    n_rows = scaled.shape[0]
     if n_rows == 0 or n_synthetic <= 0:
-        return np.empty((0, window_size, scaled.shape[1]), dtype=np.float32)
+        return np.empty((0, window_size), dtype=np.intp)
+    return rng.integers(0, n_rows, size=(n_synthetic, window_size)).astype(
+        np.intp, copy=False
+    )
 
-    indices = rng.integers(0, n_rows, size=(n_synthetic, window_size))
-    return scaled[indices].astype(np.float32)
+
+def _gather_windows(scaled: np.ndarray, index: np.ndarray) -> np.ndarray:
+    if len(index) == 0:
+        return np.empty((0, index.shape[1], scaled.shape[1]), dtype=np.float32)
+    return np.asarray(scaled, dtype=np.float32)[index]
 
 
 def _make_per_flow_sequences(
     df: pd.DataFrame,
     scaled: np.ndarray,
     window_size: int,
+    rows: Optional[np.ndarray] = None,
 ) -> np.ndarray:
+    # rows: build only the windows ending at these flow positions (in this
+    # order) — windows still draw on every flow of the same src_ip.
     n_flows = len(scaled)
     n_features = scaled.shape[1]
-    sequences = np.zeros((n_flows, window_size, n_features), dtype=np.float32)
+    if rows is None:
+        out_idx = np.arange(n_flows)
+        n_out = n_flows
+    else:
+        out_idx = np.full(n_flows, -1)
+        out_idx[rows] = np.arange(len(rows))
+        n_out = len(rows)
+    sequences = np.zeros((n_out, window_size, n_features), dtype=np.float32)
 
     has_meta = all(c in df.columns for c in SEQUENCE_META_COLUMNS)
 
     if has_meta:
-        tmp = df[["src_ip", "timestamp"]].copy()
+        order = _order_column(df)
+        tmp = df[["src_ip", order]].copy()
         tmp["_pos"] = range(n_flows)
         for _, group in tmp.groupby("src_ip", sort=False):
-            group_sorted = group.sort_values("timestamp")
+            group_sorted = group.sort_values(order, kind="stable")
             positions = group_sorted["_pos"].values
             for k, pos in enumerate(positions):
+                if out_idx[pos] < 0:
+                    continue
                 start_in_group = max(0, k + 1 - window_size)
                 window_pos = positions[start_in_group : k + 1]
                 pad_len = window_size - len(window_pos)
-                sequences[pos, pad_len:] = scaled[window_pos]
+                sequences[out_idx[pos], pad_len:] = scaled[window_pos]
     else:
         for i in range(n_flows):
+            if out_idx[i] < 0:
+                continue
             start = max(0, i + 1 - window_size)
             pad_len = window_size - (i + 1 - start)
-            sequences[i, pad_len:] = scaled[start : i + 1]
+            sequences[out_idx[i], pad_len:] = scaled[start : i + 1]
 
     return sequences
 
@@ -356,14 +436,28 @@ class DeepAutoencoder:
         self.val_sequences: Optional[np.ndarray] = None
 
         self.ae_mse_scores: Optional[np.ndarray] = None
+        # test_df positions of full windows — the only ones live inference
+        # scores; ae_mse_scores / test_labels* are aligned to these.
+        self.test_eval_rows: Optional[np.ndarray] = None
         self.ae_threshold: Optional[Dict[str, float]] = None
 
         self.scaler: Optional[StandardScaler] = None
         self.clip_params: Optional[Dict[str, Dict[str, float]]] = None
         self.log_transform_features: Optional[List[str]] = None
+        self.capped_features: Optional[List[str]] = None
+        # Per tail feature: whether each test flow's value is on its tail side.
+        self.tail_test_masks: Optional[Dict[str, np.ndarray]] = None
 
         self.autoencoder_model: Optional[LSTMAutoencoderModel] = None
         self.lightning_module: Optional[LSTMAutoencoderLightningModule] = None
+
+        # Finetune (load_pretrained): the source model and its FPR before.
+        self.pretrained: Optional[Dict] = None
+        self.pretrained_source: Optional[str] = None
+        # --score: all loaded benign flows are scored, nothing is trained.
+        self.score_mode: bool = False
+        self.finetune_before: Optional[Dict[str, float]] = None
+        self.split_ranges: Dict[str, List[int]] = {}
 
         self.config: DeepAutoencoderConfig = config or DeepAutoencoderConfig()
         self.log: Logger = Logger(__name__)
@@ -430,35 +524,66 @@ class DeepAutoencoder:
                 "Time-based splits require a 'timestamp' field, but this is not present in benign_data."
             )
 
-        all_cols = available_features + meta_cols + ["Label"]
+        order_cols = [c for c in [FLOW_ORDER_COLUMN] if c in self.benign_data.columns]
+        # dst_ip/dst_port ride along for analyze_feature_errors only.
+        extra_cols = [c for c in ANALYSIS_META_COLUMNS if c in self.benign_data.columns]
+        all_cols = available_features + meta_cols + order_cols + extra_cols + ["Label"]
         benign_all = self.benign_data[all_cols].copy()
 
-        benign_sorted = benign_all.sort_values("timestamp").reset_index(drop=True)
-        n = len(benign_sorted)
-
+        # Split by flow start time; same-second ties keep drain order.
+        benign_sorted = benign_all.sort_values(
+            ["timestamp"] + order_cols, kind="stable"
+        ).reset_index(drop=True)
+        self.log.info(
+            f"Window order: {_order_column(benign_sorted)}"
+            + ("" if order_cols else " (no flow_seq — rerun preprocessing)")
+        )
         test_frac = self.config.test_split
         val_frac = self.config.validation_split
-        train_end = int(n * (1 - test_frac - val_frac))
-        val_end = int(n * (1 - test_frac))
 
-        self.benign_train = benign_sorted.iloc[:train_end].reset_index(drop=True)
-        self.benign_val = benign_sorted.iloc[train_end:val_end].reset_index(drop=True)
-        benign_test = benign_sorted.iloc[val_end:].reset_index(drop=True)
+        # Finetune uses the same split: all loaded data is the new data.
+        # --score: everything is scored, nothing is trained or calibrated.
+        if self.score_mode:
+            val_frac, test_frac = 0.0, 1.0
+        self.benign_train, self.benign_val, benign_test = self._split_by_time(
+            benign_sorted, val_frac, test_frac
+        )
+        if (
+            self.pretrained is not None
+            and not self.score_mode
+            and (len(self.benign_train) == 0 or len(self.benign_val) == 0)
+        ):
+            raise TrainingError("Too little new data for a train/val split")
 
+        for split, df in [
+            ("train", self.benign_train),
+            ("val", self.benign_val),
+            ("test", benign_test),
+        ]:
+            if len(df):
+                self.split_ranges[split] = [
+                    int(df["timestamp"].min()),
+                    int(df["timestamp"].max()),
+                ]
         self.log.info(
-            f"Time-based split boundaries — "
-            f"train ends: {datetime.fromtimestamp(benign_sorted['timestamp'].iloc[train_end - 1] / 1000).strftime('%Y-%m-%d %H:%M:%S')}, "
-            f"val ends: {datetime.fromtimestamp(benign_sorted['timestamp'].iloc[val_end - 1] / 1000).strftime('%Y-%m-%d %H:%M:%S')}, "
-            f"test ends: {datetime.fromtimestamp(benign_sorted['timestamp'].iloc[-1] / 1000).strftime('%Y-%m-%d %H:%M:%S')}"
+            "Time-based split (UTC) — "
+            + ", ".join(
+                f"{k}: {_fmt_utc(a)} .. {_fmt_utc(b)}"
+                for k, (a, b) in self.split_ranges.items()
+            )
         )
 
         atk_meta_cols = [
             c for c in SEQUENCE_META_COLUMNS if c in self.attack_data.columns
         ]
-        atk_cols = available_features + atk_meta_cols + ["Label"]
+        atk_cols = (
+            available_features + atk_meta_cols + order_cols + extra_cols + ["Label"]
+        )
         attack_all = self.attack_data[
             [c for c in atk_cols if c in self.attack_data.columns]
         ].copy()
+        if self.score_mode:
+            attack_all = attack_all.iloc[:0]
 
         test_labels_orig = pd.concat(
             [benign_test["Label"], attack_all["Label"]],
@@ -489,6 +614,9 @@ class DeepAutoencoder:
 
     def preprocess_data(self) -> None:
         self.log.info("Preprocessing data (scale flow features only)...")
+        if self.pretrained is not None:
+            self._preprocess_frozen()
+            return
 
         def _feat(df: pd.DataFrame) -> pd.DataFrame:
             return df[self._feature_cols].copy()
@@ -530,7 +658,10 @@ class DeepAutoencoder:
             self.clip_params[col] = {"lower": float(lower), "upper": float(upper)}
 
         self.scaler = StandardScaler()
-        self.benign_train_scaled_raw = self.scaler.fit_transform(train_feat)
+        self.scaler.fit(train_feat)
+        self._cap_bound_z(train_feat, test_feat)
+
+        self.benign_train_scaled_raw = self.scaler.transform(train_feat)
         self.benign_val_scaled_raw = self.scaler.transform(val_feat)
         self.test_features_scaled_raw = self.scaler.transform(test_feat)
 
@@ -544,6 +675,55 @@ class DeepAutoencoder:
         self.test_features_scaled = _clip_scaled(self.test_features_scaled_raw)
 
         self.log.info("Preprocessing completed")
+
+    def _cap_bound_z(self, train_feat: pd.DataFrame, test_feat: pd.DataFrame) -> None:
+        # Long-tailed / zero-inflated features (e.g. rst_flag_cnt) put their
+        # winsorize bound many std from the mean, letting rare-but-normal
+        # values dominate the reconstruction MSE. Widen scale_ just enough
+        # that both bounds land within max_bound_z std; the exported mean/std
+        # stays a plain affine, so inference is unchanged.
+        max_z = self.config.max_bound_z
+        rows = []
+        self.capped_features = []
+        self.tail_test_masks = {}
+        for i, col in enumerate(self.scaler.feature_names_in_):
+            lo = self.clip_params[col]["lower"]
+            hi = self.clip_params[col]["upper"]
+            mean, std = self.scaler.mean_[i], self.scaler.scale_[i]
+            at_lo = float((train_feat[col] <= lo).mean())
+            z_lo, z_hi = (lo - mean) / std, (hi - mean) / std
+            if max(-z_lo, z_hi) > self.config.tail_check_z:
+                median = train_feat[col].median()
+                self.tail_test_masks[col] = (
+                    test_feat[col].values > median
+                    if z_hi >= -z_lo
+                    else test_feat[col].values < median
+                )
+            new_std = std
+            if max_z is not None:
+                new_std = max(std, (hi - mean) / max_z, (mean - lo) / max_z)
+            if new_std > std:
+                self.scaler.scale_[i] = new_std
+                self.capped_features.append(col)
+            rows.append((col, at_lo, z_lo, z_hi, std / new_std))
+
+        rows.sort(key=lambda r: -max(abs(r[2]), abs(r[3])))
+        self.log.info(
+            "Feature mass at winsorize lower bound / z-score of bounds:\n"
+            + "\n".join(
+                f"  {col:<22} at_lo={at_lo:7.2%}  z_lo={z_lo:8.3f}  z_hi={z_hi:8.3f}"
+                + (f"  -> scale x{1 / ratio:.2f}" if ratio < 1 else "")
+                for col, at_lo, z_lo, z_hi, ratio in rows
+            )
+        )
+        self.log.info(
+            f"Bound z capped at {max_z} ({len(self.capped_features)} features): "
+            f"{self.capped_features}"
+        )
+        self.log.info(
+            f"Tail FPR check (bound |z| > {self.config.tail_check_z}): "
+            f"{list(self.tail_test_masks)}"
+        )
 
     def _check_feature_saturation(self) -> None:
         # Checked on the scaled training data itself, before post_scaling_clip
@@ -574,28 +754,35 @@ class DeepAutoencoder:
         S = self.config.stride
         self.log.info(f"Building sequences — window_size={W}, stride={S} (training)")
 
-        self.train_sequences = _make_train_sequences(
-            self.benign_train, self.benign_train_scaled, W, S
+        train_index = _train_window_index(
+            self.benign_train, len(self.benign_train_scaled), W, S
         )
 
-        n_synthetic = int(
-            len(self.train_sequences) * self.config.synthetic_augmentation_ratio
-        )
-        if n_synthetic > 0:
-            rng = np.random.default_rng(self.config.split_random_state)
-            synthetic_sequences = _make_synthetic_sequences(
-                self.benign_train_scaled, W, n_synthetic, rng
-            )
-            self.train_sequences = np.concatenate(
-                [self.train_sequences, synthetic_sequences], axis=0
-            )
+        n_synthetic = int(len(train_index) * self.config.synthetic_augmentation_ratio)
+        if n_synthetic > 0 and W == 1:
+            # A single random flow is just a duplicate of a training row:
+            # no new combinations, only a longer epoch.
             self.log.info(
-                f"Added {n_synthetic:,} synthetic combination sequences "
+                "Synthetic augmentation skipped: window_size=1 has no "
+                "flow combinations to synthesize"
+            )
+        elif n_synthetic > 0:
+            rng = np.random.default_rng(self.config.split_random_state)
+            synthetic_index = _synthetic_window_index(
+                len(self.benign_train_scaled), W, n_synthetic, rng
+            )
+            train_index = np.concatenate([train_index, synthetic_index])
+            self.log.info(
+                f"Added {len(synthetic_index):,} synthetic combination sequences "
                 f"(ratio={self.config.synthetic_augmentation_ratio})"
             )
 
-        self.val_sequences = _make_train_sequences(
-            self.benign_val, self.benign_val_scaled, W, S
+        self.train_sequences = _gather_windows(self.benign_train_scaled, train_index)
+        del train_index
+
+        self.val_sequences = _gather_windows(
+            self.benign_val_scaled,
+            _train_window_index(self.benign_val, len(self.benign_val_scaled), W, S),
         )
 
         self.log.info(
@@ -615,6 +802,9 @@ class DeepAutoencoder:
 
     def build_autoencoder(self) -> None:
         self.log.info("Building LSTM Deep Autoencoder...")
+        if self.pretrained is not None:
+            self._build_from_pretrained()
+            return
 
         input_dim = len(self._feature_cols)
 
@@ -637,21 +827,54 @@ class DeepAutoencoder:
         self.lightning_module = LSTMAutoencoderLightningModule(
             model=self.autoencoder_model,
             learning_rate=self.config.learning_rate,
+            weight_decay=self.config.weight_decay,
             clipnorm=self.config.clipnorm,
             reduce_lr_factor=self.config.reduce_lr_factor,
             reduce_lr_patience=self.config.reduce_lr_patience,
             min_lr=self.config.min_lr,
             latent_norm_weight=self.config.latent_norm_weight,
+            reduce_lr_min_delta=self.config.early_stopping_min_delta,
         )
 
         total_params = sum(p.numel() for p in self.autoencoder_model.parameters())
         self.log.info(f"Total parameters: {total_params:,}")
 
+    def _build_from_pretrained(self) -> None:
+        # Structure and weights from the pretrained checkpoint; lr scaled
+        # down so finetuning adjusts rather than overwrites what it learned.
+        ckpt = self.pretrained["checkpoint"]
+        self.autoencoder_model = LSTMAutoencoderModel(
+            input_dim=ckpt["input_dim"],
+            hidden_size=ckpt["hidden_size"],
+            num_layers=ckpt["num_layers"],
+            encoding_dim=ckpt["encoding_dim"],
+            dropout=ckpt.get("dropout", self.config.dropout),
+        )
+        self.autoencoder_model.load_state_dict(ckpt["model_state_dict"])
+        lr = self.config.learning_rate * self.config.finetune_lr_scale
+        self.lightning_module = LSTMAutoencoderLightningModule(
+            model=self.autoencoder_model,
+            learning_rate=lr,
+            weight_decay=self.config.weight_decay,
+            clipnorm=self.config.clipnorm,
+            reduce_lr_factor=self.config.reduce_lr_factor,
+            reduce_lr_patience=self.config.reduce_lr_patience,
+            min_lr=self.config.min_lr,
+            latent_norm_weight=self.config.latent_norm_weight,
+            reduce_lr_min_delta=self.config.early_stopping_min_delta,
+        )
+        self.log.info(
+            f"Loaded pretrained weights: input_dim={ckpt['input_dim']}, "
+            f"hidden={ckpt['hidden_size']}, layers={ckpt['num_layers']}, "
+            f"bottleneck={ckpt['encoding_dim']}; lr={lr:.2e}"
+        )
+
     def train_autoencoder(self, resume_ckpt: Optional[Path] = None) -> None:
         self.log.info("Training LSTM Deep Autoencoder with PyTorch Lightning...")
 
-        train_dataset = TensorDataset(torch.FloatTensor(self.train_sequences))
-        val_dataset = TensorDataset(torch.FloatTensor(self.val_sequences))
+        # from_numpy shares the arrays' memory; FloatTensor copied them.
+        train_dataset = TensorDataset(torch.from_numpy(self.train_sequences))
+        val_dataset = TensorDataset(torch.from_numpy(self.val_sequences))
 
         num_workers = min(4, os.cpu_count() or 1)
 
@@ -684,7 +907,7 @@ class DeepAutoencoder:
             EarlyStopping(
                 monitor="val_loss",
                 patience=self.config.early_stopping_patience,
-                min_delta=1e-6,
+                min_delta=self.config.early_stopping_min_delta,
                 mode="min",
                 verbose=True,
             ),
@@ -718,6 +941,11 @@ class DeepAutoencoder:
         else:
             self.log.info("No checkpoint provided, starting training from scratch...")
 
+        # Scoring before training (finetune_baseline) leaves the module in
+        # eval mode, and Lightning restores that mode after its validation
+        # sanity check: cuDNN then refuses the LSTM backward, and on CPU
+        # dropout would silently stay off for the whole training.
+        self.lightning_module.train()
         trainer.fit(
             self.lightning_module,
             train_loader,
@@ -736,29 +964,386 @@ class DeepAutoencoder:
         self.log.info(f"Training completed: {trainer.current_epoch + 1} epochs")
         self.log.info(f"Best validation loss: {callbacks[2].best_model_score:.6f}")
 
+        # Nothing after training reads the windows; free them (and the
+        # loaders' persistent workers) before scoring builds the test windows.
+        del trainer, train_loader, val_loader, train_dataset, val_dataset
+        self.train_sequences = None
+        self.val_sequences = None
+        gc.collect()
+
+    def load_pretrained(
+        self,
+        model_dir: str = "./artifacts",
+        backup: bool = True,
+    ) -> None:
+        # Finetune start point: weights, structure and frozen preprocessing
+        # (log1p set, winsorize bounds, scaler) of a finished model, so the
+        # exported preprocessing stays compatible. All loaded benign data is
+        # the new data; the old data is not needed.
+        src = Path(model_dir)
+        pt_path, pkl_path = src / "deep_autoencoder.pt", src / "deep_ae_config.pkl"
+        if not pt_path.exists() or not pkl_path.exists():
+            raise TrainingError(
+                f"Finetune needs {pt_path} and {pkl_path} from a finished model"
+            )
+
+        if backup and src.resolve() == Path("artifacts").resolve():
+            dest = Path("artifacts") / f"pretrained_{self.datestamp}"
+            dest.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(pt_path, dest / pt_path.name)
+            shutil.copy2(pkl_path, dest / pkl_path.name)
+            self.pretrained_source = str(dest)
+            self.log.info(f"Backed up pretrained model to {dest}/")
+        else:
+            self.pretrained_source = str(src)
+
+        cfg = joblib.load(pkl_path)
+        ckpt = torch.load(pt_path, map_location="cpu", weights_only=False)
+        self.pretrained = {"config": cfg, "checkpoint": ckpt}
+
+        if ckpt.get("window_size", self.config.window_size) != self.config.window_size:
+            self.log.warning(
+                f"window_size {self.config.window_size} -> {ckpt['window_size']} "
+                "(taken from the pretrained model)"
+            )
+            self.config.window_size = ckpt["window_size"]
+
+        if backup:
+            self.log.info(
+                f"Finetuning from {self.pretrained_source} on all loaded data, "
+                f"lr x{self.config.finetune_lr_scale} — the new data should cover "
+                "all normal traffic the model must keep accepting (no old data "
+                "replayed)"
+            )
+        else:
+            self.log.info(
+                f"Using model {self.pretrained_source} with its frozen preprocessing"
+            )
+
+    def load_for_scoring(self, model_dir: str = "./artifacts") -> None:
+        # --score: model + frozen preprocessing from model_dir, thresholds
+        # from its config; nothing is backed up, trained or recalibrated.
+        self.score_mode = True
+        self.load_pretrained(model_dir, backup=False)
+        self.ae_threshold = self.pretrained["config"]["ae_thresholds"]
+        if self.config.analysis_threshold not in self.ae_threshold:
+            raise TrainingError(
+                f"Unknown threshold '{self.config.analysis_threshold}'; "
+                f"choose one of {list(self.ae_threshold)}"
+            )
+
+    def score_report(self) -> None:
+        # Scores every full benign window of the loaded data with the saved
+        # thresholds, to compare against the alert rate Mantis sees live on
+        # the same period (e.g. one day's traffic_log CSV).
+        name = self.config.analysis_threshold
+        threshold = self.ae_threshold[name]
+        self._select_full_test_windows()
+        rows = self.test_eval_rows
+        scores = self._ae_predict_mse(
+            _make_per_flow_sequences(
+                self.test_df,
+                self.test_features_scaled,
+                self.config.window_size,
+                rows=rows,
+            )
+        )
+        self.ae_mse_scores = scores
+        ts = self.test_df["timestamp"].values[rows]
+        self.log.info(
+            f"\nScored {len(scores):,} full benign windows "
+            f"({_fmt_utc(ts.min())} .. {_fmt_utc(ts.max())} UTC); "
+            f"score median={np.median(scores):.6f}, p99={np.percentile(scores, 99):.6f}"
+        )
+
+        hourly = (
+            pd.DataFrame(
+                {
+                    "hour": np.asarray(
+                        pd.to_datetime(ts, unit="ms", utc=True).strftime(
+                            "%Y-%m-%d %H:00"
+                        )
+                    ),
+                    "fp": scores > threshold,
+                }
+            )
+            .groupby("hour", sort=True)["fp"]
+            .agg(["size", "sum"])
+        )
+        lines = [
+            f"\nHourly benign FPR @ {name}={threshold:.6f} (UTC):",
+            f"  {'Hour':<17} {'Windows':>9} {'FP':>8} {'FP rate':>9}",
+        ]
+        for hour, r in hourly.iterrows():
+            lines.append(
+                f"  {hour:<17} {int(r['size']):>9,} {int(r['sum']):>8,} "
+                f"{r['sum'] / r['size']:>9.2%}"
+            )
+        self.log.info("\n".join(lines))
+        self._score_by_verdict(scores, rows, name, threshold)
+
+    def _score_by_verdict(
+        self, scores: np.ndarray, rows: np.ndarray, name: str, threshold: float
+    ) -> None:
+        # A window is labelled with the verdict of its last flow, the flow
+        # Mantis scored live. Scoring the same period with the model before
+        # and after a retrain shows whether it learned what an operator
+        # marked as false positives: the "suppressed" share over the
+        # threshold should drop, while "normal" should not rise.
+        if "ml_verdict" not in self.test_df.columns:
+            self.log.info(
+                "\nNo ML Verdict column in the data (not recorded by Mantis, or "
+                "preprocessed before it was kept) — no per-verdict breakdown"
+            )
+            return
+        verdicts = (
+            self.test_df["ml_verdict"]
+            .fillna("(none)")
+            .astype(str)
+            .str.strip()
+            .replace({"nan": "(none)", "<NA>": "(none)", "": "(none)"})
+            .to_numpy(dtype=object)[rows]
+        )
+        by_verdict = (
+            pd.DataFrame(
+                {"verdict": verdicts, "score": scores, "fp": scores > threshold}
+            )
+            .groupby("verdict", sort=True)
+            .agg(
+                windows=("score", "size"), median=("score", "median"), fp=("fp", "sum")
+            )
+        )
+        lines = [
+            f"\nBenign windows by ML Verdict @ {name}={threshold:.6f}:",
+            f"  {'Verdict':<17} {'Windows':>9} {'Median':>10} {'Over':>8} {'Over %':>8}",
+        ]
+        for verdict, r in by_verdict.iterrows():
+            lines.append(
+                f"  {verdict:<17} {int(r['windows']):>9,} {r['median']:>10.6f} "
+                f"{int(r['fp']):>8,} {r['fp'] / r['windows']:>8.2%}"
+            )
+        self.log.info("\n".join(lines))
+
+    def match_trained_split(self, model_dir: str = "./artifacts") -> None:
+        # For -fa on a finetuned model: use its frozen preprocessing (refitting
+        # would not reproduce the inherited scaler).
+        lineage = (
+            joblib.load(Path(model_dir) / "deep_ae_config.pkl").get("lineage") or {}
+        )
+        if lineage.get("finetuned_from") is not None:
+            self.load_pretrained(model_dir, backup=False)
+
+    def _split_by_time(
+        self, df: pd.DataFrame, val_frac: float, test_frac: float
+    ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        n = len(df)
+        train_end = int(n * (1 - test_frac - val_frac))
+        val_end = int(n * (1 - test_frac))
+        return (
+            df.iloc[:train_end].reset_index(drop=True),
+            df.iloc[train_end:val_end].reset_index(drop=True),
+            df.iloc[val_end:].reset_index(drop=True),
+        )
+
+    def _transform_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        # Frozen preprocessing (finetune): clean -> log1p -> winsorize with
+        # the pretrained parameters; scaling is applied by the caller.
+        feat = df[self._feature_cols].replace([np.inf, -np.inf], np.nan)
+        feat = feat.fillna(self.config.fill_value)
+        for col in self.log_transform_features:
+            feat[col] = np.log1p(feat[col].clip(lower=0))
+        for col, p in self.clip_params.items():
+            feat[col] = np.clip(feat[col], p["lower"], p["upper"])
+        return feat
+
+    def _preprocess_frozen(self) -> None:
+        cfg = self.pretrained["config"]
+        if list(cfg["feature_names"]) != list(self._feature_cols):
+            missing = [f for f in cfg["feature_names"] if f not in self._feature_cols]
+            raise TrainingError(
+                "New data does not have the pretrained model's features "
+                f"(missing: {missing or 'none — different order/extra columns'}); "
+                "finetuning needs the same features, otherwise retrain from scratch"
+            )
+        self.log_transform_features = list(cfg["log_transform_features"])
+        self.clip_params = cfg["clip_params"]
+        self.scaler = cfg["scaler"]
+        self.capped_features = list(cfg.get("capped_features") or [])
+        self.log.info(
+            "Preprocessing frozen from the pretrained model "
+            f"({len(self.log_transform_features)} log1p features, "
+            f"capped: {self.capped_features})"
+        )
+
+        # New values beyond the frozen winsorize bounds get clipped: a high
+        # share means the new traffic outgrew the old preprocessing. --score
+        # has no train split, so it reports on the scored benign flows.
+        ref = self.benign_train if len(self.benign_train) else self.test_df
+        raw = ref[self._feature_cols].replace([np.inf, -np.inf], np.nan)
+        raw = raw.fillna(self.config.fill_value)
+        for col in self.log_transform_features:
+            raw[col] = np.log1p(raw[col].clip(lower=0))
+        rows = []
+        for col, p in self.clip_params.items():
+            below = float((raw[col] < p["lower"]).mean())
+            above = float((raw[col] > p["upper"]).mean())
+            rows.append((col, below, above))
+        rows.sort(key=lambda r: -(r[1] + r[2]))
+        self.log.info(
+            f"{'Scored' if self.score_mode else 'New train'} data outside the "
+            "frozen winsorize bounds "
+            "(pretrained bounds keep ~0.5% per side; much more = outgrown):\n"
+            + "\n".join(
+                f"  {c:<22} below={b:7.2%}  above={a:7.2%}" for c, b, a in rows[:10]
+            )
+        )
+
+        train_feat = self._transform_features(ref)
+        test_feat = self._transform_features(self.test_df)
+
+        self.tail_test_masks = {}
+        for i, col in enumerate(self.scaler.feature_names_in_):
+            lo, hi = self.clip_params[col]["lower"], self.clip_params[col]["upper"]
+            mean, std = self.scaler.mean_[i], self.scaler.scale_[i]
+            z_lo, z_hi = (lo - mean) / std, (hi - mean) / std
+            if (
+                col in self.capped_features
+                or max(-z_lo, z_hi) > self.config.tail_check_z
+            ):
+                median = train_feat[col].median()
+                self.tail_test_masks[col] = (
+                    test_feat[col].values > median
+                    if z_hi >= -z_lo
+                    else test_feat[col].values < median
+                )
+
+        def _scale(feat: pd.DataFrame) -> np.ndarray:
+            if len(feat) == 0:  # --score has no train/val
+                return np.zeros((0, len(self._feature_cols)))
+            return self.scaler.transform(feat)
+
+        self.benign_train_scaled_raw = _scale(train_feat)
+        self.benign_val_scaled_raw = _scale(self._transform_features(self.benign_val))
+        self.test_features_scaled_raw = _scale(test_feat)
+        self._check_feature_saturation()
+
+        def _clip(arr: np.ndarray) -> np.ndarray:
+            return np.clip(arr, self.config.clip_min, self.config.clip_max)
+
+        self.benign_train_scaled = _clip(self.benign_train_scaled_raw)
+        self.benign_val_scaled = _clip(self.benign_val_scaled_raw)
+        self.test_features_scaled = _clip(self.test_features_scaled_raw)
+        self.log.info("Preprocessing completed (frozen)")
+
+    def finetune_baseline(self) -> None:
+        # Pretrained model (weights just loaded, not yet trained) on the new
+        # test period at its own threshold — the "before" column.
+        name = self.config.analysis_threshold
+        threshold = self.pretrained["config"]["ae_thresholds"][name]
+        self._select_full_test_windows()
+        benign_rows = self.test_eval_rows[(self.test_labels == 0).values]
+        new_scores = self._ae_predict_mse(
+            _make_per_flow_sequences(
+                self.test_df,
+                self.test_features_scaled,
+                self.config.window_size,
+                rows=benign_rows,
+            )
+        )
+        self.finetune_before = {
+            "threshold": threshold,
+            "new": _rate(new_scores > threshold),
+        }
+        self.log.info(
+            f"Pretrained model @ {name}={threshold:.6f}: benign FPR on the new "
+            f"test period {_pct(self.finetune_before['new'])}"
+        )
+
+    def finetune_report(self) -> None:
+        # Before/after: did finetuning learn the new traffic (new test FPR
+        # down)?
+        name = self.config.analysis_threshold
+        threshold = self.ae_threshold[name]
+        new_scores = self.ae_mse_scores[(self.test_labels == 0).values]
+        after_new = _rate(new_scores > threshold)
+        before = self.finetune_before or {}
+        nan = float("nan")
+        self.log.info(
+            "\n".join(
+                [
+                    f"\nFinetune check — benign FPR @ {name} (full windows):",
+                    f"  {'':<26} {'Pretrained':>11} {'Finetuned':>11}",
+                    f"  {'threshold':<26} {before.get('threshold', nan):>11.6f} "
+                    f"{threshold:>11.6f}",
+                    f"  {'new test (learned?)':<26} {_pct(before.get('new', nan)):>11} "
+                    f"{_pct(after_new):>11}",
+                ]
+            )
+        )
+
+    def _select_full_test_windows(self) -> None:
+        # Restrict evaluation to full windows (live inference never scores
+        # padded ones) and align test_labels* to them. Flows of src_ips with
+        # fewer than window_size flows are never scored live — a blind spot
+        # reported here per attack class.
+        if self.test_eval_rows is not None:
+            return
+        W = self.config.window_size
+        full = _window_fill(self.test_df, W) >= W
+        self.test_eval_rows = np.flatnonzero(full)
+
+        labels_orig = self.test_labels_orig.reset_index(drop=True)
+        lines = [
+            f"\nTest windows: {int(full.sum()):,}/{len(full):,} full "
+            f"(padded windows skipped, as in live inference):",
+            f"  {'Label':<35} {'Full':>10} {'Skipped':>10} {'Skipped %':>10}",
+        ]
+        for label in sorted(labels_orig.unique()):
+            m = (labels_orig == label).values
+            n_full, n_all = int((m & full).sum()), int(m.sum())
+            lines.append(
+                f"  {label:<35} {n_full:>10,} {n_all - n_full:>10,} "
+                f"{(n_all - n_full) / n_all:>10.2%}"
+            )
+        self.log.info("\n".join(lines))
+
+        self.test_labels = self.test_labels.iloc[self.test_eval_rows].reset_index(
+            drop=True
+        )
+        self.test_labels_orig = labels_orig.iloc[self.test_eval_rows].reset_index(
+            drop=True
+        )
+
     def predict_autoencoder(self) -> None:
         self.log.info(
             "Calculating LSTM AE anomaly scores on test set "
             f"({len(self.test_df):,} flows)..."
         )
 
+        W = self.config.window_size
+        val_rows = np.flatnonzero(_window_fill(self.benign_val, W) >= W)
+        self.log.info(
+            f"Val windows: {len(val_rows):,}/{len(self.benign_val):,} full "
+            f"(padded windows skipped, as in live inference)"
+        )
         val_seqs = _make_per_flow_sequences(
-            self.benign_val,
-            self.benign_val_scaled,
-            self.config.window_size,
+            self.benign_val, self.benign_val_scaled, W, rows=val_rows
         )
         val_scores = self._ae_predict_mse(val_seqs)
         self.log.info(
             f"Validation scores — mean={val_scores.mean():.6f}, std={val_scores.std():.6f}"
         )
 
+        self._select_full_test_windows()
         per_flow_seqs = _make_per_flow_sequences(
             self.test_df,
             self.test_features_scaled,
             self.config.window_size,
+            rows=self.test_eval_rows,
         )
 
         self.ae_mse_scores = self._ae_predict_mse(per_flow_seqs)
+        del per_flow_seqs
 
         ae_mse_benign = self.ae_mse_scores[self.test_labels == 0]
         ae_mse_attack = self.ae_mse_scores[self.test_labels == 1]
@@ -769,7 +1354,7 @@ class DeepAutoencoder:
             else 0
         )
 
-        candidate_names = [f"p{p}" for p in range(90, 100)] + [
+        candidate_names = [_percentile_name(p) for p in THRESHOLD_PERCENTILES] + [
             "mean+2std",
             "mean+1std",
             "Q3+1.5IQR",
@@ -781,7 +1366,7 @@ class DeepAutoencoder:
         iqr_val = q3_val - q1_val
 
         val_candidate_values = np.array(
-            [float(np.percentile(val_scores, p)) for p in range(90, 100)]
+            [float(np.percentile(val_scores, p)) for p in THRESHOLD_PERCENTILES]
             + [
                 float(val_scores.mean() + 2 * val_scores.std()),
                 float(val_scores.mean() + 1 * val_scores.std()),
@@ -795,7 +1380,7 @@ class DeepAutoencoder:
         iqr_test = q3_test - q1_test
 
         test_candidate_values = np.array(
-            [float(np.percentile(ae_mse_benign, p)) for p in range(90, 100)]
+            [float(np.percentile(ae_mse_benign, p)) for p in THRESHOLD_PERCENTILES]
             + [
                 float(ae_mse_benign.mean() + 2 * ae_mse_benign.std()),
                 float(ae_mse_benign.mean() + 1 * ae_mse_benign.std()),
@@ -860,6 +1445,434 @@ class DeepAutoencoder:
                 ]
             )
         )
+
+        self._check_tail_feature_fpr()
+
+    def _check_tail_feature_fpr(self) -> None:
+        # Benign FPR split by whether the scored window holds a tail value
+        # (past the train median, on the far-bound side) of a long-tailed
+        # feature: a large gap means that feature's rare-but-normal values
+        # dominate the reconstruction error.
+        benign = (self.test_labels == 0).values
+        scores = self.ae_mse_scores
+
+        for col, tail in self.tail_test_masks.items():
+            in_window = (
+                _make_per_flow_sequences(
+                    self.test_df,
+                    tail.astype(np.float32)[:, None],
+                    self.config.window_size,
+                    rows=self.test_eval_rows,
+                )
+                .max(axis=(1, 2))
+                .astype(bool)
+            )
+            with_mask = benign & in_window
+            without_mask = benign & ~in_window
+            n_with, n_without = int(with_mask.sum()), int(without_mask.sum())
+
+            lines = [
+                f"\nBenign FPR by {col} tail value in window [Test Set]:",
+                f"  with tail      : n={n_with:,}  "
+                + (
+                    f"median score={np.median(scores[with_mask]):.6f}"
+                    if n_with
+                    else "(none)"
+                ),
+                f"  without tail   : n={n_without:,}  "
+                + (
+                    f"median score={np.median(scores[without_mask]):.6f}"
+                    if n_without
+                    else "(none)"
+                ),
+                f"{'Name':<14} {'Threshold':<14} {'FPR with':<12} {'FPR without':<12} {'Ratio':<8}",
+                "-" * 62,
+            ]
+            for name, threshold in self.ae_threshold.items():
+                fpr_with = (scores[with_mask] > threshold).mean() if n_with else 0.0
+                fpr_without = (
+                    (scores[without_mask] > threshold).mean() if n_without else 0.0
+                )
+                ratio = fpr_with / fpr_without if fpr_without > 0 else float("nan")
+                lines.append(
+                    f"{name:<14} {threshold:<14.6f} {f'{fpr_with:.2%}':<12} "
+                    f"{f'{fpr_without:.2%}':<12} {ratio:<8.2f}"
+                )
+            self.log.info("\n".join(lines))
+
+    def load_trained_model(self) -> None:
+        # Loads artifacts/ from a previous training run so the analysis below
+        # can run without retraining. Call after preprocess_data(): the refit
+        # scaler must match the saved one, or the model would see different
+        # inputs than it was trained on (e.g. the parquet changed since).
+        ckpt = torch.load(
+            Path("artifacts") / "deep_autoencoder.pt",
+            map_location="cpu",
+            weights_only=False,
+        )
+        self.autoencoder_model = LSTMAutoencoderModel(
+            input_dim=ckpt["input_dim"],
+            hidden_size=ckpt["hidden_size"],
+            num_layers=ckpt["num_layers"],
+            encoding_dim=ckpt["encoding_dim"],
+            dropout=ckpt.get("dropout", 0.0),
+        )
+        self.autoencoder_model.load_state_dict(ckpt["model_state_dict"])
+        self.lightning_module = LSTMAutoencoderLightningModule(
+            model=self.autoencoder_model
+        )
+
+        saved = joblib.load(Path("artifacts") / "deep_ae_config.pkl")
+        saved_scaler = saved["scaler"]
+        if list(saved["feature_names"]) != list(self._feature_cols) or not (
+            np.allclose(saved_scaler.mean_, self.scaler.mean_)
+            and np.allclose(saved_scaler.scale_, self.scaler.scale_)
+        ):
+            raise TrainingError(
+                "Preprocessing does not match artifacts/deep_ae_config.pkl "
+                "(different data or preprocessing code since training); "
+                "the saved model cannot be analysed on this data."
+            )
+        self.ae_threshold = saved["ae_thresholds"]
+        self.log.info(
+            f"Loaded trained model from artifacts/ "
+            f"(thresholds={list(self.ae_threshold)})"
+        )
+
+    def _ae_predict_feature_err(
+        self, sequences: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        # Squared error averaged over timesteps, shape (n, F) — its mean over
+        # features is exactly the anomaly score from _ae_predict_mse — and
+        # averaged over features, shape (n, W), to find the worst step (the
+        # flow Mantis blames for the alert).
+        self.lightning_module.eval()
+        self.lightning_module.to(self.device)
+
+        n, window, n_features = sequences.shape
+        feat_err = np.zeros((n, n_features), dtype=np.float32)
+        step_err = np.zeros((n, window), dtype=np.float32)
+
+        with torch.no_grad():
+            for start in range(0, n, self.config.inference_batch_size):
+                end = min(start + self.config.inference_batch_size, n)
+                batch = torch.FloatTensor(sequences[start:end]).to(self.device)
+                recon = self.lightning_module(batch).cpu().numpy()
+                sq = np.square(sequences[start:end] - recon)
+                feat_err[start:end] = sq.mean(axis=1)
+                step_err[start:end] = sq.mean(axis=2)
+
+        return feat_err, step_err
+
+    def analyze_feature_errors(self) -> None:
+        # Which features push benign test windows over the val threshold
+        # (false positives), and which src_ips those windows come from.
+        name = self.config.analysis_threshold
+        threshold = self.ae_threshold[name]
+        cols = list(self._feature_cols)
+        self._select_full_test_windows()
+        benign_rows = self.test_eval_rows[(self.test_labels == 0).values]
+
+        self.log.info(
+            f"Per-feature error analysis on {len(benign_rows):,} benign test "
+            f"windows @ val threshold {name}={threshold:.6f}..."
+        )
+        seqs = _make_per_flow_sequences(
+            self.test_df,
+            self.test_features_scaled,
+            self.config.window_size,
+            rows=benign_rows,
+        )
+        feat_err, step_err = self._ae_predict_feature_err(seqs)
+        del seqs
+        scores = feat_err.mean(axis=1)
+        fp = scores > threshold
+
+        lines = [
+            "\nBenign FPR on test set @ val thresholds (what deployment sees):",
+            f"{'Name':<14} {'Threshold':<14} {'Val FPR':<10} {'Test FPR':<10}",
+            "-" * 50,
+        ]
+        val_fpr = {_percentile_name(p): (100 - p) / 100 for p in THRESHOLD_PERCENTILES}
+        for n_, t in self.ae_threshold.items():
+            vf = f"{val_fpr[n_]:.2%}" if n_ in val_fpr else "-"
+            lines.append(
+                f"{n_:<14} {t:<14.6f} {vf:<10} {f'{(scores > t).mean():.2%}':<10}"
+            )
+        self.log.info("\n".join(lines))
+
+        n_fp = int(fp.sum())
+        if n_fp == 0 or n_fp == len(fp):
+            self.log.info(f"No split at {name}: {n_fp:,} false positives")
+            return
+
+        self._log_feature_error_table(
+            f"Feature error: {n_fp:,} false-positive vs {len(fp) - n_fp:,} "
+            f"true-negative benign windows @ {name}",
+            cols,
+            feat_err[fp],
+            feat_err[~fp],
+        )
+
+        # Within FP windows holding a tail value of a tail feature: is that
+        # feature's own error what pushes them over, or other features?
+        for col, tail in self.tail_test_masks.items():
+            in_window = (
+                _make_per_flow_sequences(
+                    self.test_df,
+                    tail.astype(np.float32)[:, None],
+                    self.config.window_size,
+                    rows=benign_rows,
+                )
+                .max(axis=(1, 2))
+                .astype(bool)
+            )
+            fp_tail = fp & in_window
+            if fp_tail.sum() == 0:
+                continue
+            self._log_feature_error_table(
+                f"Feature error: {int(fp_tail.sum()):,} false-positive windows "
+                f"with {col} tail vs {int((~fp & in_window).sum()):,} "
+                f"true-negative windows with {col} tail @ {name}",
+                cols,
+                feat_err[fp_tail],
+                feat_err[~fp & in_window],
+                highlight=col,
+            )
+
+        if "src_ip" in self.test_df.columns:
+            ips = self.test_df["src_ip"].values[benign_rows]
+            by_ip = (
+                pd.DataFrame({"src_ip": ips, "fp": fp})
+                .groupby("src_ip")["fp"]
+                .agg(["size", "sum"])
+                .sort_values("sum", ascending=False)
+            )
+            lines = [
+                f"\nFalse positives by src_ip @ {name} "
+                f"({len(by_ip):,} benign src_ips, top 15 by FP count):",
+                f"  {'src_ip':<40} {'Windows':>9} {'FP':>9} {'FP rate':>9} {'% of FP':>9}",
+            ]
+            for ip, row in by_ip.head(15).iterrows():
+                lines.append(
+                    f"  {str(ip):<40} {int(row['size']):>9,} {int(row['sum']):>9,} "
+                    f"{row['sum'] / row['size']:>9.2%} {row['sum'] / n_fp:>9.2%}"
+                )
+            self.log.info("\n".join(lines))
+
+            top_hosts = [
+                ip
+                for ip in by_ip.index[: self.config.analysis_top_hosts]
+                if by_ip.at[ip, "sum"] > 0
+            ]
+            for host in top_hosts:
+                m = ips == host
+                self._analyze_fp_host(
+                    host, benign_rows[m], fp[m], step_err[m], threshold, name
+                )
+
+    def _analyze_fp_host(
+        self,
+        host: str,
+        rows: np.ndarray,
+        fp: np.ndarray,
+        step_err: np.ndarray,
+        threshold: float,
+        name: str,
+    ) -> None:
+        # Drill-down on one src_ip with many false positives: was it in
+        # training, when did its FPR rise, and which destinations get blamed.
+        W = self.config.window_size
+        test_benign = self.test_df.iloc[
+            self.test_eval_rows[(self.test_labels == 0).values]
+        ]
+
+        # 1. Presence per split (no splits when scoring)
+        lines = (
+            []
+            if self.score_mode
+            else [
+                f"\n[{host}] presence per split (benign flows):",
+                f"  {'Split':<6} {'Flows':>10} {'% of split':>11}",
+            ]
+        )
+        for split, df in [
+            ("train", self.benign_train),
+            ("val", self.benign_val),
+            ("test", test_benign),
+        ]:
+            if self.score_mode:
+                break
+            n_host = int((df["src_ip"] == host).sum())
+            lines.append(
+                f"  {split:<6} {n_host:>10,} {n_host / max(len(df), 1):>11.2%}"
+            )
+        if lines:
+            self.log.info("\n".join(lines))
+
+        # 2. Daily FPR (UTC days) over val + test; train shows flow counts
+        val_host = (self.benign_val["src_ip"] == host).values
+        val_rows = np.flatnonzero((_window_fill(self.benign_val, W) >= W) & val_host)
+        val_scores = (
+            self._ae_predict_mse(
+                _make_per_flow_sequences(
+                    self.benign_val, self.benign_val_scaled, W, rows=val_rows
+                )
+            )
+            if len(val_rows)
+            else np.zeros(0, dtype=np.float32)
+        )
+
+        def _day(ts: np.ndarray) -> np.ndarray:
+            return np.asarray(
+                pd.to_datetime(ts, unit="ms", utc=True).strftime("%Y-%m-%d")
+            )
+
+        train_ts = self.benign_train.loc[
+            self.benign_train["src_ip"] == host, "timestamp"
+        ].values
+        daily = (
+            pd.concat(
+                [
+                    pd.DataFrame(
+                        {"day": _day(train_ts), "split": "train", "fp": np.nan}
+                    ),
+                    pd.DataFrame(
+                        {
+                            "day": _day(self.benign_val["timestamp"].values[val_rows]),
+                            "split": "val",
+                            "fp": (val_scores > threshold).astype(float),
+                        }
+                    ),
+                    pd.DataFrame(
+                        {
+                            "day": _day(self.test_df["timestamp"].values[rows]),
+                            "split": "test",
+                            "fp": fp.astype(float),
+                        }
+                    ),
+                ],
+                ignore_index=True,
+            )
+            .assign(
+                split=lambda d: pd.Categorical(
+                    d["split"], ["train", "val", "test"], ordered=True
+                )
+            )
+            .groupby(["day", "split"], sort=True, observed=True)["fp"]
+            .agg(["size", "sum", "mean"])
+        )
+        lines = [
+            f"\n[{host}] daily benign FPR @ {name} "
+            "(UTC days; train rows are flow counts, not scored):",
+            f"  {'Day':<11} {'Split':<6} {'Windows':>9} {'FP':>8} {'FP rate':>9}",
+        ]
+        for (day, split), r in daily.iterrows():
+            if split == "train":
+                lines.append(
+                    f"  {day:<11} {split:<6} {int(r['size']):>9,} {'-':>8} {'-':>9}"
+                )
+            else:
+                lines.append(
+                    f"  {day:<11} {split:<6} {int(r['size']):>9,} "
+                    f"{int(r['sum']):>8,} {r['mean']:>9.2%}"
+                )
+        self.log.info("\n".join(lines))
+
+        # 3. Destinations of the blamed (worst-step) flow, as Mantis reports
+        dst_cols = [c for c in ANALYSIS_META_COLUMNS if c in self.test_df.columns]
+        if not dst_cols:
+            self.log.info(
+                f"[{host}] no dst_ip/dst_port in the data — rerun preprocessing "
+                "to see which destinations the false positives go to"
+            )
+            return
+        if len(self.test_df) >= 2**24:
+            self.log.warning(f"[{host}] test set too large to map blamed flows")
+            return
+        # Window step -> test_df row (float32 is exact below 2**24).
+        flow_ids = (
+            _make_per_flow_sequences(
+                self.test_df,
+                np.arange(1, len(self.test_df) + 1, dtype=np.float32)[:, None],
+                W,
+                rows=rows,
+            )[:, :, 0].astype(np.int64)
+            - 1
+        )
+        blamed = flow_ids[np.arange(len(rows)), step_err.argmax(axis=1)]
+
+        train_host = self.benign_train[self.benign_train["src_ip"] == host]
+        n_fp = max(int(fp.sum()), 1)
+        for col in dst_cols:
+            vals = self.test_df[col].astype(str).values[blamed]
+            by_dst = (
+                pd.DataFrame({"dst": vals, "fp": fp})
+                .groupby("dst")["fp"]
+                .agg(["size", "sum"])
+                .sort_values("sum", ascending=False)
+            )
+            seen_host = train_host[col].astype(str).value_counts()
+            seen_all = self.benign_train[col].astype(str).value_counts()
+            # Training data is not loaded when scoring: no Train columns.
+            train_cols = not self.score_mode
+            lines = [
+                f"\n[{host}] false positives by blamed {col} @ {name} (top 15"
+                + ("; Train = flows to it in training):" if train_cols else "):"),
+                f"  {col:<40} {'Windows':>9} {'FP':>8} {'FP rate':>9} {'% of FP':>8}"
+                + (f" {'Train(host)':>12} {'Train(all)':>11}" if train_cols else ""),
+            ]
+            for dst, r in by_dst.head(15).iterrows():
+                lines.append(
+                    f"  {dst:<40} {int(r['size']):>9,} {int(r['sum']):>8,} "
+                    f"{r['sum'] / r['size']:>9.2%} {r['sum'] / n_fp:>8.2%}"
+                    + (
+                        f" {int(seen_host.get(dst, 0)):>12,} "
+                        f"{int(seen_all.get(dst, 0)):>11,}"
+                        if train_cols
+                        else ""
+                    )
+                )
+            self.log.info("\n".join(lines))
+
+    def _log_feature_error_table(
+        self,
+        title: str,
+        cols: List[str],
+        err_a: np.ndarray,
+        err_b: np.ndarray,
+        highlight: Optional[str] = None,
+        top: int = 15,
+    ) -> None:
+        # Share = feature's part of group A's total error; Gap share = its part
+        # of how much higher group A's error is than group B's — the features
+        # that actually push A over the threshold.
+        mean_a = err_a.mean(axis=0)
+        mean_b = err_b.mean(axis=0) if len(err_b) else np.zeros_like(mean_a)
+        gap = mean_a - mean_b
+        share = mean_a / mean_a.sum()
+        gap_share = gap / gap.sum() if gap.sum() > 0 else np.zeros_like(gap)
+        order = np.argsort(-gap)
+
+        lines = [
+            f"\n{title} (top {top} by error gap):",
+            f"  {'Rank':<5} {'Feature':<22} {'Err A':>10} {'Err B':>10} "
+            f"{'Ratio':>8} {'Share A':>8} {'Gap share':>10}",
+        ]
+        for rank, i in enumerate(order[:top], start=1):
+            ratio = mean_a[i] / mean_b[i] if mean_b[i] > 0 else float("nan")
+            lines.append(
+                f"  {rank:<5} {cols[i]:<22} {mean_a[i]:>10.5f} {mean_b[i]:>10.5f} "
+                f"{ratio:>8.1f} {share[i]:>8.1%} {gap_share[i]:>10.1%}"
+            )
+        if highlight is not None and highlight in cols:
+            i = cols.index(highlight)
+            rank = int(np.flatnonzero(order == i)[0]) + 1
+            lines.append(
+                f"  -> {highlight}: rank {rank}/{len(cols)}, "
+                f"share A {share[i]:.1%}, gap share {gap_share[i]:.1%}"
+            )
+        self.log.info("\n".join(lines))
 
     def bootstrap_metrics(
         self,
@@ -938,7 +1951,7 @@ class DeepAutoencoder:
         attack_mask = self.test_labels.values == 1
 
         output = pd.DataFrame(
-            self.test_df[self._feature_cols].values[attack_mask],
+            self.test_df[self._feature_cols].values[self.test_eval_rows][attack_mask],
             columns=self._feature_cols,
         )
         output["ae_anomaly_score"] = self.ae_mse_scores[attack_mask]
@@ -979,6 +1992,17 @@ class DeepAutoencoder:
             "feature_names": self._feature_cols,
             "ae_thresholds": self.ae_threshold,
             "log_transform_features": self.log_transform_features,
+            "capped_features": self.capped_features,
+            "lineage": {
+                "created_at": datetime.now().isoformat(timespec="seconds"),
+                "split_ranges_ms": self.split_ranges,
+                "finetuned_from": self.pretrained_source,
+                "parent": (
+                    self.pretrained["config"].get("lineage")
+                    if self.pretrained
+                    else None
+                ),
+            },
         }
         config_path = Path("artifacts") / "deep_ae_config.pkl"
         joblib.dump(config_data, config_path)
@@ -1144,18 +2168,18 @@ class DeepAutoencoder:
         self.lightning_module.to(self.device)
 
         # Use per-flow sequences so each sample has a latent vector
+        total = len(self.test_eval_rows)
+        n_samples = min(n_samples, total)
+        rng = np.random.default_rng(42)
+        idx = rng.choice(total, n_samples, replace=False)
         per_flow_seqs = _make_per_flow_sequences(
             self.test_df,
             self.test_features_scaled,
             self.config.window_size,
+            rows=self.test_eval_rows[idx],
         )
 
-        total = len(per_flow_seqs)
-        n_samples = min(n_samples, total)
-        rng = np.random.default_rng(42)
-        idx = rng.choice(total, n_samples, replace=False)
-
-        x_sample = torch.FloatTensor(per_flow_seqs[idx]).to(self.device)
+        x_sample = torch.FloatTensor(per_flow_seqs).to(self.device)
         labels_sample = self.test_labels_orig.iloc[idx].values
 
         with torch.no_grad():

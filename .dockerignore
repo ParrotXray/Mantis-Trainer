@@ -25,9 +25,15 @@ dist-ssr
 *.sw?
 
 src/artifacts/*
+src/datasets/
+src/.datasets-staging/
+src/outputs/
+src/logs/
+**/*.parquet
 src/exports/*
 src/metadata/*
 src/rawdata/*
 src/plots/*
+.git
 .github/*
-*.csv
+**/*.csv

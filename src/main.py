@@ -1,170 +1,86 @@
 #!/usr/bin/env python3
 
-
 import argparse
-import sys
-import time
-from datetime import timedelta
+from typing import List
 
-from components import DataPreprocess, DeepAutoencoder, Exporter
-from model import download_dataset, get_dataset_config, list_available_datasets
-from utils import Logger, pipeline_stage
+from pipeline import (
+    ArgsParser,
+    CsvPool,
+    PipelineError,
+    PipelinePlanner,
+    PipelineRequest,
+    Stage,
+)
+from pipeline.runner import PipelineRunner
+from utils import Logger
 
-if __name__ == "__main__":
-    Logger.setup_logging()
+EPILOG = """
+Examples:
+  ./main.py -a
+  ./main.py -dp --args "dp.exclude_verdicts=none"
+  ./main.py -da --args "da.epochs=50 da.batch_size=4096"
+  ./main.py -da --args "run.resume=artifacts/autoencoder_temp-v14.ckpt"
+  ./main.py -ft --args "run.model_dir=./old_model da.finetune_lr_scale=0.05"
+  ./main.py -sc --args "da.analysis_threshold=p99.5"
+  ./main.py -fa --args "da.analysis_threshold=p95"
+  ./main.py -ex
 
-    log = Logger("Main")
+Stages read CSV files from $DATASET_ROOT (default ./datasets).
+--args takes section.key=value pairs. Sections: dp (PreprocessConfig),
+da (DeepAutoencoderConfig), ex (ExportConfig) and run (resume, model_dir).
+The section prefix is required on every key.
+"""
 
-    total_start = time.perf_counter()
+STAGE_FLAGS = (
+    ("-a", "--all", Stage.ALL, "Run dp + da + ex"),
+    ("-dp", "--datapreprocess", Stage.DP, "Preprocess every CSV in $DATASET_ROOT"),
+    ("-da", "--deepautoencoder", Stage.DA, "Train LSTM Autoencoder"),
+    ("-ft", "--finetune", Stage.FT, "Finetune the model in model_dir on loaded data"),
+    ("-sc", "--score", Stage.SC, "Score preprocessed data with the model in model_dir"),
+    ("-fa", "--feature-analysis", Stage.FA, "Per-feature error analysis of the model"),
+    ("-ex", "--export", Stage.EX, "Export model to ONNX"),
+)
 
-    available = list_available_datasets()
 
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Mantis ML Training Pipeline",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=f"""
-Examples:
-  # Single dataset (auto-download from Kaggle)
-  python main.py -s xxx/xxx-dataset -a
-
-  # Merge multiple datasets
-  python main.py -s xxx/xxx-dataset,yyy/yyy-dataset -a
-
-  # All three datasets
-  python main.py -s xxx/xxx-dataset,yyy/yyy-dataset,zzz/zzz-dataset -a
-
-  # Use local dataset paths (override auto-download)
-  python main.py -s xxx/xxx-dataset --path "/data/xxx" -a
-
-  # Run individual stages
-  python main.py -s xxx/xxx-dataset -dp     # Preprocess only
-  python main.py -da                        # Train LSTM Autoencoder
-  python main.py -ep                        # Export to ONNX
-
-Available datasets: {', '.join(available)}
-        """,
+        epilog=EPILOG,
     )
-
+    for short, long, stage, text in STAGE_FLAGS:
+        parser.add_argument(
+            short,
+            long,
+            dest="stages",
+            action="append_const",
+            const=stage,
+            help=text,
+        )
     parser.add_argument(
-        "-s",
-        "--set",
-        help=f"Dataset kaggle id(s), comma-separated ({', '.join(available)})",
+        "--args",
+        default="",
+        metavar="SECTION.KEY=VALUE ...",
+        help='Extra parameters, e.g. --args "da.epochs=50 da.clip_min=-4"',
     )
-    parser.add_argument(
-        "--path",
-        help="Optional: path(s) to local dataset directories, comma-separated. "
-        "If omitted, datasets are auto-downloaded via kagglehub.",
-    )
+    return parser
 
-    parser.add_argument(
-        "-a", "--all", action="store_true", help="Run complete pipeline"
-    )
-    parser.add_argument(
-        "-dp", "--datapreprocess", action="store_true", help="Data preprocessing"
-    )
-    parser.add_argument(
-        "-da",
-        "--deepautoencoder",
-        action="store_true",
-        help="Train LSTM Deep Autoencoder",
-    )
-    parser.add_argument(
-        "-ep", "--export", action="store_true", help="Export models to ONNX"
-    )
 
-    parser.add_argument(
-        "--resume",
-        default=None,
-        help="Resume training from checkpoint (e.g. ./artifacts/autoencoder_temp-v14.ckpt)",
-    )
-
+def main() -> None:
+    Logger.setup_logging()
+    parser = build_parser()
     args = parser.parse_args()
-
-    if not any(
-        [
-            args.all,
-            args.datapreprocess,
-            args.deepautoencoder,
-            args.export,
-        ]
-    ):
+    stages: List[Stage] = args.stages or []
+    if not stages:
         parser.print_help()
-        sys.exit(0)
+        return
+    planner = PipelinePlanner(CsvPool(CsvPool.default_data_root()), ArgsParser())
+    try:
+        options = planner.plan(PipelineRequest(stages=stages, args=args.args))
+    except PipelineError as exc:
+        parser.error(str(exc))
+    PipelineRunner().run(options)
 
-    if args.all or args.datapreprocess:
-        data_preproces_start = time.perf_counter()
 
-        if not args.set:
-            parser.error("-s/--set is required for preprocessing")
-
-        dataset_names = [s.strip() for s in args.set.split(",")]
-        dataset_configs = [get_dataset_config(name) for name in dataset_names]
-
-        if args.path:
-            dataset_paths = [p.strip() for p in args.path.split(",")]
-            if len(dataset_names) != len(dataset_paths):
-                parser.error(
-                    f"Number of datasets ({len(dataset_names)}) "
-                    f"must match number of paths ({len(dataset_paths)})"
-                )
-        else:
-            log.info("No --path provided, downloading datasets via kagglehub...")
-            dataset_paths = [download_dataset(cfg) for cfg in dataset_configs]
-
-        log.info(f"Datasets: {', '.join(dataset_names)}")
-
-        with pipeline_stage("Data Preprocessing"):
-            with DataPreprocess(dataset_configs, dataset_paths) as dp:
-                dp.load_datasets()
-                dp.statistics_dataset()
-                dp.feature_preparation()
-                dp.output_result()
-
-        data_preproces_end = time.perf_counter()
-        log.info(
-            f"Data preprocessing execution time: {timedelta(seconds=(data_preproces_end - data_preproces_start))}"
-        )
-
-    if args.all or args.deepautoencoder:
-        deep_autoencoder_start = time.perf_counter()
-
-        with pipeline_stage("LSTM Deep Autoencoder"):
-            with DeepAutoencoder() as da:
-                da.check_environment()
-                da.load_data()
-                da.prepare_data()
-                da.preprocess_data()
-                da.build_sequences()
-                da.build_autoencoder()
-                da.train_autoencoder(resume_ckpt=args.resume)
-                da.predict_autoencoder()
-                da.bootstrap_metrics()
-                da.save_results()
-                da.generate_visualizations()
-
-        deep_autoencoder_end = time.perf_counter()
-        log.info(
-            f"LSTM Deep Autoencoder execution time: {timedelta(seconds=(deep_autoencoder_end - deep_autoencoder_start))}"
-        )
-
-    if args.all or args.export:
-        export_start = time.perf_counter()
-
-        with pipeline_stage("Export models to ONNX", delay=0):
-            with Exporter() as ep:
-                ep.load_models()
-                ep.export_deep_ae_onnx()
-                ep.build_config_json()
-                ep.save_config_json()
-                ep.verify_onnx_models()
-                ep.verify_onnx_export()
-                ep.print_summary()
-
-        export_end = time.perf_counter()
-        log.info(
-            f"Export models to ONNX execution time: {timedelta(seconds=(export_end - export_start))}"
-        )
-
-    total_end = time.perf_counter()
-
-    log.info(f"Execution time: {timedelta(seconds=(total_end - total_start))}")
+if __name__ == "__main__":
+    main()

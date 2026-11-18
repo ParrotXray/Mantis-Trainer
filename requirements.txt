@@ -4,24 +4,19 @@ scipy<=1.16.2
 pyarrow<=25.0.0
 
 scikit-learn<=1.7.2
-imbalanced-learn<=0.14.1
 
-torch<=2.10.0
-lightning[extra]<=2.6.1
-
-lightgbm<=4.6.0
-optuna<=4.3.0
+lightning<=2.6.1
+tensorboardX<=2.6.4
 
 onnx<=1.17.0
 onnxruntime<=1.23.2
-skl2onnx<=1.20.0
-onnxscript<=0.6.0
-onnxmltools<=1.13.0
 
 matplotlib<=3.10.8
-seaborn<=0.13.2
 
-kagglehub<=1.0.0
+fastapi<=0.163.0
+uvicorn[standard]<=0.54.0
+python-multipart<=0.0.32
+nvidia-ml-py<=13.615.71
 
 joblib<=1.5.3
 ujson<=5.11.0

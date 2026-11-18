@@ -146,6 +146,7 @@ class Exporter:
         }
 
         self.full_config = {
+            "version": self.config.version,
             "created_at": pd.Timestamp.now().isoformat(),
             "framework": "PyTorch",
             "model": {

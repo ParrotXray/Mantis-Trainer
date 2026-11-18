@@ -2,20 +2,23 @@
 set -e
 cd src/
 
-CMD="./main.py"
-
-if [ -n "$DATASET" ]; then
-    CMD="$CMD --set $DATASET"
-fi
-
 if [ -n "$DATAPATH" ]; then
-    CMD="$CMD --path $DATAPATH"
+    export DATASET_ROOT="$DATAPATH"
 fi
 
-[ "$ALL" = "true" ] && CMD="$CMD --all"
-[ "$DATAPREPROCESS" = "true" ] && CMD="$CMD --datapreprocess"
-[ "$DEEPAUTOENCODER" = "true" ] && CMD="$CMD --deepautoencoder"
-[ "$EXPORT" = "true" ] && CMD="$CMD --export"
-[ -n "$RESUME" ] && CMD="$CMD --resume $RESUME"
+if [ "$API" = "true" ]; then
+    exec ./server.py "$@"
+fi
 
-exec $CMD "$@"
+CMD=(./main.py)
+
+[ "$ALL" = "true" ] && CMD+=(--all)
+[ "$DATAPREPROCESS" = "true" ] && CMD+=(--datapreprocess)
+[ "$DEEPAUTOENCODER" = "true" ] && CMD+=(--deepautoencoder)
+[ "$FINETUNE" = "true" ] && CMD+=(--finetune)
+[ "$SCORE" = "true" ] && CMD+=(--score)
+[ "$FEATUREANALYSIS" = "true" ] && CMD+=(--feature-analysis)
+[ "$EXPORT" = "true" ] && CMD+=(--export)
+[ -n "$ARGS" ] && CMD+=(--args "$ARGS")
+
+exec "${CMD[@]}" "$@"

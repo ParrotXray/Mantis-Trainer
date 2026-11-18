@@ -33,3 +33,5 @@ src/metadata/*
 src/rawdata/*
 src/plots/*
 *.csv
+src/datasets/*
+src/.datasets-staging/

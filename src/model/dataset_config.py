@@ -1,17 +1,30 @@
 from dataclasses import dataclass
 from typing import Dict, Final, List
 
-import kagglehub
 import pandas as pd
 
-from utils import Logger
-
-from .error import UnavailableDatasetError
-
-logger = Logger(__name__)
-
-
 SEQUENCE_META_COLUMNS: Final[List[str]] = ["timestamp", "src_ip"]
+# Drain order of each flow (Mantis writes one CSV row when a flow is
+# drained, i.e. the order live inference buffers flows per src_ip).
+# Optional: windows fall back to "timestamp" order when it is absent.
+FLOW_ORDER_COLUMN: Final[str] = "flow_seq"
+# Mantis's own judgement of each flow at capture time (normal, anomaly,
+# rule_match, structural, confirmed_attack, suppressed, uninspected). Only present in CSVs recorded
+# by a Mantis that writes it; Label stays BENIGN regardless.
+ML_VERDICT_COLUMN: Final[str] = "ML Verdict"
+# Kept in the parquet for analysis only (where false positives go); never
+# model inputs.
+# "direction" is Mantis's capture side of the flow's initiator: egress =
+# started from the internal network, ingress = started from outside.
+# "ml_verdict" is ML_VERDICT_COLUMN after mapping; --score breaks its report
+# down by it, e.g. to check that a retrained model stops flagging flows an
+# operator marked as false positives (suppressed).
+ANALYSIS_META_COLUMNS: Final[List[str]] = [
+    "dst_ip",
+    "dst_port",
+    "direction",
+    "ml_verdict",
+]
 
 UNIFIED_FEATURE_NAMES: Final[List[str]] = [
     "flow_duration",
@@ -72,7 +85,7 @@ class DatasetConfig:
     benign_labels: List[str]
     label_mapping: Dict[str, str]
     column_mapping: Dict[str, str]
-    kaggle_dataset_id: str = ""
+    name: str = ""
     csv_glob: str = "*.csv"
     header_file: str = ""
     header_name_column: str = ""
@@ -179,6 +192,8 @@ _EXTENDED_COLUMN_MAPPING: Final[Dict[str, str]] = {
     "Flow IAT Mean": "flow_iat_mean",
     "Packet Length Mean": "pkt_len_mean",
     "Destination Port": "dst_port",
+    "Direction": "direction",
+    "ML Verdict": "ml_verdict",
     "Protocol": "protocol",
     "PSH Flag Count": "psh_flag_cnt",
     "ACK Flag Count": "ack_flag_cnt",
@@ -230,6 +245,8 @@ _EXTENDED_COLUMN_MAPPING: Final[Dict[str, str]] = {
     "Timestamp": "timestamp",
     "Src IP": "src_ip",
     "Source IP": "src_ip",
+    "Dst IP": "dst_ip",
+    "Destination IP": "dst_ip",
 }
 
 
@@ -256,7 +273,7 @@ class DatasetRegistry:
 def get_dataset_config(name: str) -> DatasetConfig:
     key = name.strip().lower()
     dataset_registry = DatasetConfig(
-        kaggle_dataset_id=key,
+        name=key,
         label_column="Label",
         benign_labels=["Normal"],
         label_mapping=_LABEL_MAPPING,
@@ -269,15 +286,3 @@ def get_dataset_config(name: str) -> DatasetConfig:
 
 def list_available_datasets() -> List[str]:
     return DatasetRegistry.list_available()
-
-
-def download_dataset(config: DatasetConfig) -> str:
-    if not config.kaggle_dataset_id:
-        raise UnavailableDatasetError(
-            f"Dataset '{config.name}' has no kaggle_dataset_id configured. "
-            f"Provide a --path manually."
-        )
-    logger.info(f"Downloading '{config.kaggle_dataset_id}' via kagglehub...")
-    path = kagglehub.dataset_download(config.kaggle_dataset_id)
-    logger.info(f"Dataset ready: {path}")
-    return path

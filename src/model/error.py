@@ -38,3 +38,9 @@ class LoadingConfigFailed(ValueError):
     """Raised when a loading error occurs"""
 
     pass
+
+
+class PipelineError(ValueError):
+    """Raised when a pipeline error occurs"""
+
+    pass

@@ -47,7 +47,7 @@ jobs:
         with:
           context: .
           platforms: linux/amd64
-          push: true
+          outputs: type=image,push=true,oci-mediatypes=true,compression=zstd,compression-level=9,force-compression=true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
