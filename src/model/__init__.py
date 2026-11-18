@@ -14,10 +14,10 @@ from .error import (
     DatasetLoadingError,
     ExportError,
     LoadingConfigFailed,
+    PipelineError,
     TrainingError,
     UnavailableDatasetError,
     UnsupportedDatasetError,
-    PipelineError,
 )
 from .export_config import ExportConfig
 from .preprocess_config import PreprocessConfig

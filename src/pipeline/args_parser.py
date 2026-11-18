@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from typing import Dict, Final, List, Tuple
 
 from model import DeepAutoencoderConfig, ExportConfig, PreprocessConfig
-
 from model.error import PipelineError
 
 SECTIONS: Final[Dict[str, type]] = {

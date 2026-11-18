@@ -5,8 +5,8 @@ import sys
 
 import uvicorn
 
-from utils import Logger
 from api import ApiSettings, SettingsError, create_app
+from utils import Logger
 
 if __name__ == "__main__":
     try:
