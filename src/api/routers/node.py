@@ -4,10 +4,10 @@ import socket
 from fastapi import APIRouter, Depends, Query, WebSocket, status
 from starlette.concurrency import run_in_threadpool
 
+from model.error import InvalidParameterError
 from pipeline import PIPELINE_ORDER
 
 from ..dependencies import get_job_service, get_metrics_stream, get_settings
-from model.error import InvalidParameterError
 from ..schemas import NodeInfo, NodeSnapshot
 from ..services import JobService, MetricsStream
 from ..settings import ApiSettings

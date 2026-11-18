@@ -1,6 +1,6 @@
 import secrets
-
 from typing import Final
+
 from fastapi import WebSocketException, status
 from starlette.requests import HTTPConnection
 

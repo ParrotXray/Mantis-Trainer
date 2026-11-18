@@ -3,9 +3,9 @@ import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Protocol
 
+from model.error import ResourceNotFoundError
 from pipeline import Stage
 
-from model.error import ResourceNotFoundError
 from ..schemas import JobStatus
 
 
