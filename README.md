@@ -156,7 +156,7 @@ da.epochs=50 da.batch_size=4096 da.clip_min=-4 dp.exclude_verdicts=none run.resu
 ### Mantis-recorded data
 
 Traffic CSVs recorded by Mantis carry an `ML Verdict` column next to `Label` (which is always `BENIGN`):
-`normal`, `anomaly`, `rule_match`, `structural`, `confirmed_attack`, `suppressed` or `uninspected`.
+`normal`, `anomaly`, `rule_match`, `structural`, `confirmed_attack`, `suppressed`, `whitelisted` or `uninspected`.
 Preprocessing logs the verdict distribution per dataset and drops the rows listed in `dp.exclude_verdicts=`.
 
 | Verdict | Evidence beyond the model |
@@ -170,13 +170,35 @@ count per source across all destinations, so a busy client's ordinary egress (ma
 services) trips them too; add `structural` to the list once those heuristics are trusted. Plain `anomaly` rows
 are kept on purpose. The live threshold flags a fixed share of benign traffic by definition, so dropping every anomaly
 would trim the benign tail on each retrain and narrow the model every cycle. `suppressed` rows were confirmed
-as false positives by an operator and are benign.
+as false positives by an operator and are benign. `whitelisted` rows matched the Mantis access-control whitelist;
+Mantis scores them (so its live windows hold the same flows as this data) but never alerts on them, and they are kept.
 
 `dp.exclude_src_ips=` / `dp.exclude_dst_ips=` (IPs or CIDR blocks, empty by default) drop rows by source or
 destination IP, for traffic the model must not learn as normal (a compromised host, a pentest box). They are not for
 hosts that alert too often: a host the model never saw scores higher once deployed, so use a Mantis suppression rule
 for those. Prefer the source list: excluding by destination also removes flows from the middle of other hosts'
 sequences. The log reports what each rule excluded.
+
+### ML Verdict report
+
+Before choosing `dp.exclude_verdicts` or `dp.exclude_src_ips`, see what they would cost on your data. The report reads
+only the `ML Verdict`, `Source IP` and `Timestamp` columns of every CSV in `$DATASET_ROOT` (in chunks, so it fits in
+little memory), changes nothing and needs none of the training dependencies:
+
+```bash
+./main.py --verdict-report
+./main.py --verdict-report --window-secs 300 --top 20
+./main.py --verdict-report --trigger-verdicts rule_match,confirmed_attack,structural --json
+```
+
+It shows the verdict distribution (unknown values are marked, files without the column are listed and left out), how
+many rows the trigger verdicts (default `rule_match,confirmed_attack`, the `dp.exclude_verdicts` default) cover, and
+every source IP with at least one trigger row: its trigger and total rows, its verdicts, whether the address is
+private, the first and last trigger time, and how many of its other rows excluding it would drop, in the whole data
+and only within `--window-secs` of one of its trigger rows (`suppressed` rows are never counted: an operator confirmed
+them as benign). A public source with few rows is a likely attacker and cheap to exclude; a private source with a large
+share is one of your own hosts, whose normal behavior an exclusion would remove too. The same report is served by
+`GET /api/v1/datasets/verdicts` and shown on the web UI's Trainer page (Datasets tab).
 
 Dropped rows keep their original position in the drain order (`flow_seq`), so windows over the remaining flows
 follow the order Mantis saw live. Datasets without the column are not affected. When preprocessing data for
@@ -230,6 +252,7 @@ Interactive docs are served at `/docs`. Job records are kept in `logs/jobs/<id>.
 | POST | `/datasets?replace=false` | Import CSV files (multipart field `files`, original file names kept; `replace=true` clears the pool first) |
 | DELETE | `/datasets/{file}` | Remove one CSV file |
 | DELETE | `/datasets` | Remove all CSV files |
+| GET | `/datasets/verdicts?trigger_verdicts=rule_match,confirmed_attack&window_secs=600&top=50&refresh=false` | ML Verdict report over the CSV pool (see [ML Verdict report](#ml-verdict-report)); cached until the pool changes, `refresh=true` reads it again |
 | GET | `/jobs/params` | Default values of all `args` keys, grouped by `dp` / `da` / `ex` / `run` |
 | POST | `/jobs/check` | Validate a job request without starting it; returns the stages, CSV files and model paths it would use |
 | POST | `/jobs` | Start a job |

@@ -265,6 +265,7 @@ Nothing runs if any of these is wrong:
 | `structural` | Aggregator FLOOD / SCAN / TARGETED verdict |
 | `confirmed_attack` | Both a rule match and an aggregator verdict |
 | `suppressed` | Confirmed as a false positive by an operator |
+| `whitelisted` | On the Mantis whitelist: scored, but never alerted |
 | `uninspected` | Not inspected |
 
 By default only the rule-backed `confirmed_attack` and `rule_match` rows are dropped. `structural` is kept because busy normal clients trigger it too. `anomaly` is kept because dropping it would trim the benign tail on every retrain and narrow the model each cycle. When preprocessing data for `sc` to compare with the live alert rate, use `dp.exclude_verdicts=none`. CSVs without the column are not affected.
@@ -272,6 +273,14 @@ By default only the rule-backed `confirmed_attack` and `rule_match` rows are dro
 **Excluding IPs**: `dp.exclude_src_ips=10.0.0.5,192.168.50.0/24` drops the rows whose source IP is in the list, which removes those hosts' whole sequences. It is for keeping bad data out of what the model learns as normal: a compromised host, a pentest box, a scanner. It is **not** for silencing a host that alerts too often: a host the model never saw scores higher once deployed; use a suppression rule in Mantis for that.
 
 `dp.exclude_dst_ips` excludes by destination IP. It also removes other hosts' flows to those addresses from the middle of their sequences, while Mantis still sees them live, so prefer `exclude_src_ips`. A malformed address is refused before anything runs (422). The preprocessing log lists the rows and addresses each rule excluded and warns when a rule matched nothing.
+
+**Look before you decide**: before setting `dp.exclude_verdicts` or `dp.exclude_src_ips`, run `./main.py --verdict-report` (or press Analyze on the web UI's Trainer page, Datasets tab; the API is `GET /api/v1/datasets/verdicts`). It reads only the `ML Verdict`, `Source IP` and `Timestamp` columns of every CSV, changes nothing and needs none of the training packages. The report lists:
+
+- the count and share of each verdict (unknown values are marked; files without an `ML Verdict` column are listed and skipped)
+- how many rows the trigger verdicts cover (default `rule_match,confirmed_attack`, the same as the `dp.exclude_verdicts` default)
+- every source IP with at least one trigger row: its trigger and total rows, its verdicts, whether the address is private, the first and last trigger time, and how many of its other rows excluding it would drop (in the whole data, and only within `--window-secs` of one of its trigger rows). `suppressed` rows are not counted: an operator confirmed them as benign.
+
+A public source with few rows is most likely an attacker and cheap to exclude; a private source with a large share is one of your own hosts, and excluding it removes its normal behavior too. Options: `--trigger-verdicts`, `--window-secs` (default 600), `--top` (default 50), `--json`.
 
 ### 5.4 `da.` (training, finetuning, analysis)
 

@@ -17,6 +17,7 @@ from .services import (
     MemoryMonitor,
     MetricsStream,
     SystemMonitor,
+    VerdictReportService,
 )
 from .settings import ApiSettings
 
@@ -31,6 +32,7 @@ class Container:
     datasets: DatasetStore
     logs: LogReader
     jobs: JobService
+    verdicts: VerdictReportService
 
     @classmethod
     def build(cls, settings: ApiSettings) -> "Container":
@@ -59,4 +61,5 @@ class Container:
             datasets=datasets,
             logs=LogReader(settings.log_dir),
             jobs=jobs,
+            verdicts=VerdictReportService(pool),
         )

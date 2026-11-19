@@ -11,6 +11,7 @@ from .job import (
 from .log import LogContent
 from .metrics import CpuMetrics, GpuDevice, GpuMetrics, MemoryMetrics, SystemMetrics
 from .node import HealthStatus, NodeInfo, NodeSnapshot
+from .verdict import VerdictReportResponse, VerdictSource
 
 __all__ = (
     "CpuMetrics",
@@ -32,4 +33,6 @@ __all__ = (
     "StageProgress",
     "StageStatus",
     "SystemMetrics",
+    "VerdictReportResponse",
+    "VerdictSource",
 )

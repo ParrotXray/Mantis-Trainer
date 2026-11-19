@@ -11,6 +11,7 @@ from .log_reader import LogReader
 from .memory_monitor import MemoryMonitor
 from .metrics_stream import MetricsStream
 from .system_monitor import SystemMonitor
+from .verdict_report_service import VerdictReportService
 
 __all__ = (
     "CpuMonitor",
@@ -27,4 +28,5 @@ __all__ = (
     "MemoryMonitor",
     "MetricsStream",
     "SystemMonitor",
+    "VerdictReportService",
 )

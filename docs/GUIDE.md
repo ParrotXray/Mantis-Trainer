@@ -265,6 +265,7 @@ da.epochs=50 da.batch_size=4096 dp.exclude_verdicts=none run.model_dir=./old_mod
 | `structural` | 聚合器判定為 FLOOD / SCAN / TARGETED |
 | `confirmed_attack` | 規則和聚合器都命中 |
 | `suppressed` | 操作員確認為誤報 |
+| `whitelisted` | 在 Mantis 白名單內：有評分，但一律不告警 |
 | `uninspected` | 未經檢查 |
 
 預設只丟有規則佐證的 `confirmed_attack` 和 `rule_match`。`structural` 保留，因為流量大的正常使用者也會觸發；`anomaly` 保留，否則每次重訓都會把正常流量的尾端修掉，模型越訓越窄。要拿資料跑 `sc` 和線上告警率比較時，前處理請用 `dp.exclude_verdicts=none`。沒有 `ML Verdict` 欄位的 CSV 不受影響。
@@ -272,6 +273,14 @@ da.epochs=50 da.batch_size=4096 dp.exclude_verdicts=none run.model_dir=./old_mod
 **排除特定 IP**：`dp.exclude_src_ips=10.0.0.5,192.168.50.0/24` 會丟掉來源 IP 在清單內的資料列，等於把這些主機的整段序列拿掉。用途是「不讓模型把壞資料學成正常」，例如中毒主機、滲透測試機、掃描器。它**不是**用來讓吵雜的主機不再告警：模型沒看過的主機，上線後反而更常被判異常；那種情況請在 Mantis 用 Suppression rule。
 
 `dp.exclude_dst_ips` 依目的 IP 排除，會連帶拿掉其他主機連到這些位址的流量，讓它們的序列中間缺幾筆，但 Mantis 線上推論時看到的是完整序列，所以優先用 `exclude_src_ips`。格式錯誤的位址在啟動前就會被拒絕（422）。前處理日誌會列出每條規則排除了幾列、幾個位址，一列都沒排到時會警告。
+
+**先看報告再決定**：設定 `dp.exclude_verdicts` 或 `dp.exclude_src_ips` 之前，可以先跑 `./main.py --verdict-report`（或在 Web UI 的 Trainer 頁面 Datasets 分頁按 Analyze，API 是 `GET /api/v1/datasets/verdicts`）。它只讀每個 CSV 的 `ML Verdict`、`Source IP`、`Timestamp` 三欄，不改任何東西，也不需要訓練用的套件。報告會列出：
+
+- 各 verdict 的數量和比例（不認得的值會標出來，沒有 `ML Verdict` 欄位的檔案會列出並略過）
+- 觸發 verdict（預設 `rule_match,confirmed_attack`，跟 `dp.exclude_verdicts` 的預設一樣）總共幾列
+- 每個至少有一筆觸發列的來源 IP：觸發列數、總列數、各 verdict 分佈、是否為私有位址、第一次和最後一次觸發的時間，以及排除它會連帶刪掉多少列（整份資料，以及只算每筆觸發列前後 `--window-secs` 秒內）。`suppressed` 的列不算，因為那是操作員確認過的正常流量。
+
+公有位址、列數少的來源，多半是攻擊者，排除的代價很小；私有位址、佔比大的來源是你自己的主機，整台排除會連它的正常行為一起拿掉。參數：`--trigger-verdicts`、`--window-secs`（預設 600）、`--top`（預設 50）、`--json`。
 
 ### 5.4 `da.`（訓練、finetune、分析）
 

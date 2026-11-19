@@ -8,6 +8,7 @@ from .services import (
     LogReader,
     MetricsStream,
     SystemMonitor,
+    VerdictReportService,
 )
 from .settings import ApiSettings
 
@@ -46,3 +47,7 @@ def get_log_reader(connection: HTTPConnection) -> LogReader:
 
 def get_job_service(connection: HTTPConnection) -> JobService:
     return get_container(connection).jobs
+
+
+def get_verdict_report_service(connection: HTTPConnection) -> VerdictReportService:
+    return get_container(connection).verdicts

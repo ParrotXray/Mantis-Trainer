@@ -2,9 +2,15 @@ from typing import List
 
 from fastapi import APIRouter, Depends, File, Query, UploadFile, status
 
-from ..dependencies import get_dataset_store, get_job_service
-from ..schemas import DatasetInventory
-from ..services import DatasetStore, JobService
+from model import VERDICT_REPORT_TOP, VERDICT_REPORT_WINDOW_SECS, VerdictReportConfig
+
+from ..dependencies import (
+    get_dataset_store,
+    get_job_service,
+    get_verdict_report_service,
+)
+from ..schemas import DatasetInventory, VerdictReportResponse
+from ..services import DatasetStore, JobService, VerdictReportService
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 
@@ -12,6 +18,33 @@ router = APIRouter(prefix="/datasets", tags=["datasets"])
 @router.get("", response_model=DatasetInventory)
 def list_datasets(store: DatasetStore = Depends(get_dataset_store)) -> DatasetInventory:
     return store.inventory()
+
+
+@router.get("/verdicts", response_model=VerdictReportResponse)
+def verdict_report(
+    trigger_verdicts: str = Query(
+        ",".join(VerdictReportConfig.trigger_verdicts),
+        description="Comma-separated ML Verdict values that flag a source",
+    ),
+    window_secs: int = Query(
+        VerdictReportConfig.window_secs,
+        ge=VERDICT_REPORT_WINDOW_SECS[0],
+        le=VERDICT_REPORT_WINDOW_SECS[1],
+    ),
+    top: int = Query(
+        VerdictReportConfig.top, ge=VERDICT_REPORT_TOP[0], le=VERDICT_REPORT_TOP[1]
+    ),
+    refresh: bool = Query(False),
+    service: VerdictReportService = Depends(get_verdict_report_service),
+) -> VerdictReportResponse:
+    config = VerdictReportConfig(
+        trigger_verdicts=tuple(
+            v.strip() for v in trigger_verdicts.split(",") if v.strip()
+        ),
+        window_secs=window_secs,
+        top=top,
+    )
+    return service.build(config, refresh)
 
 
 @router.post("", response_model=DatasetInventory, status_code=status.HTTP_201_CREATED)

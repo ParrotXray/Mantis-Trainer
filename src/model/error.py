@@ -46,6 +46,12 @@ class PipelineError(ValueError):
     pass
 
 
+class ReportError(ValueError):
+    """Raised when a report cannot be built with the given settings"""
+
+    pass
+
+
 class SettingsError(Exception):
     pass
 

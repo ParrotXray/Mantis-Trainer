@@ -20,6 +20,7 @@ from .error import (
     LoadingConfigFailed,
     PayloadTooLargeError,
     PipelineError,
+    ReportError,
     ResourceNotFoundError,
     SettingsError,
     StorageError,
@@ -30,6 +31,16 @@ from .error import (
 )
 from .export_config import ExportConfig
 from .preprocess_config import PreprocessConfig
+from .verdict_report import (
+    ML_VERDICTS,
+    OPERATOR_BENIGN_VERDICTS,
+    RULE_BACKED_VERDICTS,
+    VERDICT_REPORT_TOP,
+    VERDICT_REPORT_WINDOW_SECS,
+    VerdictReportConfig,
+    VerdictReportResult,
+    VerdictReportSource,
+)
 
 __all__ = (
     "DatasetConfig",
@@ -52,6 +63,7 @@ __all__ = (
     "ExportError",
     "LoadingConfigFailed",
     "PipelineError",
+    "ReportError",
     "SettingsError",
     "ApiError",
     "UnauthorizedError",
@@ -61,4 +73,12 @@ __all__ = (
     "JobConflictError",
     "PayloadTooLargeError",
     "StorageError",
+    "ML_VERDICTS",
+    "OPERATOR_BENIGN_VERDICTS",
+    "RULE_BACKED_VERDICTS",
+    "VERDICT_REPORT_TOP",
+    "VERDICT_REPORT_WINDOW_SECS",
+    "VerdictReportConfig",
+    "VerdictReportResult",
+    "VerdictReportSource",
 )
