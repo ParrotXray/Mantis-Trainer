@@ -328,10 +328,13 @@ da.epochs=50 da.batch_size=4096 dp.exclude_verdicts=none run.model_dir=./old_mod
 
 | 參數 | 預設 | 用途 |
 |---|---|---|
+| `da.scaling` | `layered` | `layered`：偏態特徵先 log1p，再 winsorize、以 `max_bound_z` 限制的標準化，最後裁剪。`quantile`：每個特徵的 midrank CDF 對應到標準常態，再裁剪；winsorize、log1p 與 `max_bound_z` 的參數不再作用。Mantis 目前無法套用 `quantile`，因此 `ex` 會拒絕匯出這種模型。`ft` 與 `sc` 沿用預訓練模型的縮放方式 |
+| `da.quantile_count` | `1000` | 僅 `quantile`：每個特徵的節點數 |
+| `da.quantile_subsample` | `1000000` | 僅 `quantile`：擬合節點用的訓練列數（隨機抽樣） |
 | `da.winsorize_lower` / `da.winsorize_upper` | `0.005` / `0.995` | 依分位數截斷極端值 |
 | `da.max_bound_z` | `4.0` | 截斷邊界距離平均值最多幾個標準差；`none` 關閉 |
 | `da.tail_check_z` | `4.0` | 邊界超過幾個標準差的特徵要額外檢查誤報 |
-| `da.clip_min` / `da.clip_max` | `-5.0` / `5.0` | 縮放後的裁剪範圍 |
+| `da.clip_min` / `da.clip_max` | `-6.0` / `6.0` | 縮放後的裁剪範圍 |
 | `da.fill_value` | `0.0` | 缺值填補 |
 
 **分析（`fa`、`sc`，以及 `da` / `ft` 結束時的報告）**

@@ -1,9 +1,23 @@
 from dataclasses import dataclass
-from typing import Optional
+from typing import Literal, Optional
 
 
 @dataclass
 class DeepAutoencoderConfig:
+    # How flow features are scaled before the model.
+    # "layered": log1p (|skew| > 1) -> winsorize -> StandardScaler with the
+    # max_bound_z cap -> clip_min/clip_max (what Mantis applies today).
+    # "quantile": each feature's empirical midrank CDF mapped onto a standard
+    # normal (QuantileScaler), then clip_min/clip_max; it replaces the
+    # log1p, winsorize and max_bound_z steps, so their keys have no effect.
+    # Mantis cannot apply "quantile" yet: ex refuses such a model.
+    # ft and sc always use the pretrained model's scaling.
+    scaling: Literal["layered", "quantile"] = "layered"
+    # "quantile" only: knots per feature, and how many training rows the
+    # knots are fitted on (a random subsample; rank error ~1/sqrt(n)).
+    quantile_count: int = 1000
+    quantile_subsample: int = 1_000_000
+
     clip_min: float = -6.0
     clip_max: float = 6.0
     winsorize_lower: float = 0.005
