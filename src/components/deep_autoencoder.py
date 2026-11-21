@@ -29,7 +29,13 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import (
+    BatchSampler,
+    DataLoader,
+    RandomSampler,
+    SequentialSampler,
+    TensorDataset,
+)
 
 from model import (
     ANALYSIS_META_COLUMNS,
@@ -932,26 +938,25 @@ class DeepAutoencoder:
         train_dataset = TensorDataset(torch.from_numpy(self.train_sequences))
         val_dataset = TensorDataset(torch.from_numpy(self.val_sequences))
 
-        num_workers = min(4, os.cpu_count() or 1)
+        # The sequences already sit in RAM, so the loaders run in this
+        # process and take each batch with one tensor index (batch_size=None
+        # with a BatchSampler) instead of collating batch_size single rows.
+        # Worker processes bought nothing here and broke on large data: jobs
+        # run under the spawn start method, so every worker got the whole
+        # tensor through /dev/shm, which is 64 MB by default in Docker
+        # ("unable to allocate shared memory ... No space left on device").
+        def _loader(dataset: TensorDataset, shuffle: bool) -> DataLoader:
+            order = RandomSampler(dataset) if shuffle else SequentialSampler(dataset)
+            return DataLoader(
+                dataset,
+                sampler=BatchSampler(order, self.config.batch_size, drop_last=False),
+                batch_size=None,
+                num_workers=0,
+                pin_memory=torch.cuda.is_available(),
+            )
 
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=self.config.batch_size,
-            shuffle=True,
-            num_workers=num_workers,
-            pin_memory=torch.cuda.is_available(),
-            persistent_workers=num_workers > 0,
-            prefetch_factor=2 if num_workers > 0 else None,
-        )
-        val_loader = DataLoader(
-            val_dataset,
-            batch_size=self.config.batch_size,
-            shuffle=False,
-            num_workers=num_workers,
-            pin_memory=torch.cuda.is_available(),
-            persistent_workers=num_workers > 0,
-            prefetch_factor=2 if num_workers > 0 else None,
-        )
+        train_loader = _loader(train_dataset, shuffle=True)
+        val_loader = _loader(val_dataset, shuffle=False)
 
         os.makedirs("./artifacts", exist_ok=True)
 
