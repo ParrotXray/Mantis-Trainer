@@ -44,6 +44,8 @@ UNIFIED_FEATURE_NAMES: Final[List[str]] = [
     "bwd_iat_std",
     "fwd_iat_min",
     "bwd_iat_min",
+    "fwd_iat_cov",
+    "bwd_iat_cov",
     "flow_iat_mean",
     "pkt_len_mean",
     # dst_port intentionally excluded — raw port numbers are not a linear
@@ -209,6 +211,8 @@ _EXTENDED_COLUMN_MAPPING: Final[Dict[str, str]] = {
     "Bwd IAT Std": "bwd_iat_std",
     "Fwd IAT Min": "fwd_iat_min",
     "Bwd IAT Min": "bwd_iat_min",
+    "Fwd IAT Cov": "fwd_iat_cov",
+    "Bwd IAT Cov": "bwd_iat_cov",
     "Flow IAT Std": "flow_iat_std",
     "Flow IAT Max": "flow_iat_max",
     "Flow IAT Min": "flow_iat_min",
