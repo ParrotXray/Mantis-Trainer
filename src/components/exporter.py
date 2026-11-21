@@ -84,6 +84,7 @@ class Exporter:
         try:
             ae_config_path = model_path / "deep_ae_config.pkl"
             ae_config = joblib.load(ae_config_path)
+            scaling = ae_config.get("scaling", "layered")
             self.ae_scaler = ae_config["scaler"]
             self.ae_clip_params = ae_config["clip_params"]
             self.encoding_dim = ae_config.get("encoding_dim", 32)
@@ -101,6 +102,12 @@ class Exporter:
         except Exception as e:
             self.log.error(f"Failed to load AE config: {e}")
             raise LoadingConfigFailed(f"Failed to load AE config: {e}")
+
+        if scaling != "layered":
+            raise ExportError(
+                f"The model uses da.scaling={scaling}, which Mantis cannot apply "
+                "yet; only da.scaling=layered models can be exported"
+            )
 
     def export_deep_ae_onnx(self) -> None:
         self.log.info("Converting LSTM Deep Autoencoder to ONNX...")

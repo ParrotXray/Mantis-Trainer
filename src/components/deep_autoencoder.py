@@ -41,6 +41,8 @@ from model import (
 )
 from utils import Logger
 
+from .quantile_scaler import QuantileScaler
+
 matplotlib.use("Agg")
 
 
@@ -441,7 +443,7 @@ class DeepAutoencoder:
         self.test_eval_rows: Optional[np.ndarray] = None
         self.ae_threshold: Optional[Dict[str, float]] = None
 
-        self.scaler: Optional[StandardScaler] = None
+        self.scaler: Optional[StandardScaler | QuantileScaler] = None
         self.clip_params: Optional[Dict[str, Dict[str, float]]] = None
         self.log_transform_features: Optional[List[str]] = None
         self.capped_features: Optional[List[str]] = None
@@ -628,6 +630,10 @@ class DeepAutoencoder:
         val_feat = _clean(_feat(self.benign_val))
         test_feat = _clean(_feat(self.test_df))
 
+        if self.config.scaling == "quantile":
+            self._fit_quantile(train_feat, val_feat, test_feat)
+            return
+
         # log1p heavy-tailed features (|skew| > 1): raw z-scoring these lets the
         # winsorize upper bound land several std past the post-scaling clip,
         # saturating any legitimate value near that bound to the clip ceiling
@@ -661,20 +667,70 @@ class DeepAutoencoder:
         self.scaler.fit(train_feat)
         self._cap_bound_z(train_feat, test_feat)
 
-        self.benign_train_scaled_raw = self.scaler.transform(train_feat)
-        self.benign_val_scaled_raw = self.scaler.transform(val_feat)
-        self.test_features_scaled_raw = self.scaler.transform(test_feat)
+        self._apply_scaler(train_feat, val_feat, test_feat)
+        self.log.info("Preprocessing completed")
 
+    def _apply_scaler(
+        self, train_feat: pd.DataFrame, val_feat: pd.DataFrame, test_feat: pd.DataFrame
+    ) -> None:
+        def _scale(feat: pd.DataFrame) -> np.ndarray:
+            if len(feat) == 0:  # --score has no train/val
+                return np.zeros((0, len(self._feature_cols)))
+            return self.scaler.transform(feat)
+
+        self.benign_train_scaled_raw = _scale(train_feat)
+        self.benign_val_scaled_raw = _scale(val_feat)
+        self.test_features_scaled_raw = _scale(test_feat)
         self._check_feature_saturation()
 
-        def _clip_scaled(arr: np.ndarray) -> np.ndarray:
+        def _clip(arr: np.ndarray) -> np.ndarray:
             return np.clip(arr, self.config.clip_min, self.config.clip_max)
 
-        self.benign_train_scaled = _clip_scaled(self.benign_train_scaled_raw)
-        self.benign_val_scaled = _clip_scaled(self.benign_val_scaled_raw)
-        self.test_features_scaled = _clip_scaled(self.test_features_scaled_raw)
+        self.benign_train_scaled = _clip(self.benign_train_scaled_raw)
+        self.benign_val_scaled = _clip(self.benign_val_scaled_raw)
+        self.test_features_scaled = _clip(self.test_features_scaled_raw)
 
-        self.log.info("Preprocessing completed")
+    def _reset_layered_state(self) -> None:
+        # Quantile scaling has no log1p set, winsorize bounds or bound-z cap,
+        # and its output is bounded, so the long-tail FPR check has nothing
+        # to look at.
+        self.log_transform_features = []
+        self.clip_params = {}
+        self.capped_features = []
+        self.tail_test_masks = {}
+
+    def _fit_quantile(
+        self, train_feat: pd.DataFrame, val_feat: pd.DataFrame, test_feat: pd.DataFrame
+    ) -> None:
+        self._reset_layered_state()
+        self.scaler = QuantileScaler(
+            n_quantiles=max(2, self.config.quantile_count),
+            subsample=self.config.quantile_subsample,
+            random_state=self.config.split_random_state,
+        )
+        self.scaler.fit(train_feat)
+        knots = [len(k) for k in self.scaler.knots_x_]
+        self.log.info(
+            f"Quantile scaling: {min(knots)}..{max(knots)} knots per feature, "
+            f"fitted on {self.scaler.n_samples_fit_:,} of {len(train_feat):,} "
+            "training rows"
+        )
+
+        # Rows sharing one value (zero-inflated counters) all map to a single
+        # midrank point; a feature mostly at one value carries little signal.
+        modal = []
+        for col in train_feat.columns:
+            share = float(train_feat[col].value_counts(normalize=True).iloc[0])
+            if share >= 0.5:
+                modal.append((col, share))
+        modal.sort(key=lambda r: -r[1])
+        self.log.info(
+            f"Features with >= 50% of training rows at one value ({len(modal)}):\n"
+            + "\n".join(f"  {col:<22} {share:7.2%}" for col, share in modal)
+        )
+
+        self._apply_scaler(train_feat, val_feat, test_feat)
+        self.log.info("Preprocessing completed (quantile)")
 
     def _cap_bound_z(self, train_feat: pd.DataFrame, test_feat: pd.DataFrame) -> None:
         # Long-tailed / zero-inflated features (e.g. rst_flag_cnt) put their
@@ -1008,6 +1064,14 @@ class DeepAutoencoder:
             )
             self.config.window_size = ckpt["window_size"]
 
+        scaling = cfg.get("scaling", "layered")
+        if scaling != self.config.scaling:
+            self.log.warning(
+                f"scaling {self.config.scaling} -> {scaling} "
+                "(taken from the pretrained model)"
+            )
+            self.config.scaling = scaling
+
         if backup:
             self.log.info(
                 f"Finetuning from {self.pretrained_source} on all loaded data, "
@@ -1165,6 +1229,9 @@ class DeepAutoencoder:
                 f"(missing: {missing or 'none — different order/extra columns'}); "
                 "finetuning needs the same features, otherwise retrain from scratch"
             )
+        if cfg.get("scaling", "layered") == "quantile":
+            self._preprocess_frozen_quantile(cfg)
+            return
         self.log_transform_features = list(cfg["log_transform_features"])
         self.clip_params = cfg["clip_params"]
         self.scaler = cfg["scaler"]
@@ -1217,23 +1284,46 @@ class DeepAutoencoder:
                     else test_feat[col].values < median
                 )
 
-        def _scale(feat: pd.DataFrame) -> np.ndarray:
-            if len(feat) == 0:  # --score has no train/val
-                return np.zeros((0, len(self._feature_cols)))
-            return self.scaler.transform(feat)
-
-        self.benign_train_scaled_raw = _scale(train_feat)
-        self.benign_val_scaled_raw = _scale(self._transform_features(self.benign_val))
-        self.test_features_scaled_raw = _scale(test_feat)
-        self._check_feature_saturation()
-
-        def _clip(arr: np.ndarray) -> np.ndarray:
-            return np.clip(arr, self.config.clip_min, self.config.clip_max)
-
-        self.benign_train_scaled = _clip(self.benign_train_scaled_raw)
-        self.benign_val_scaled = _clip(self.benign_val_scaled_raw)
-        self.test_features_scaled = _clip(self.test_features_scaled_raw)
+        self._apply_scaler(
+            train_feat, self._transform_features(self.benign_val), test_feat
+        )
         self.log.info("Preprocessing completed (frozen)")
+
+    def _preprocess_frozen_quantile(self, cfg: Dict) -> None:
+        self._reset_layered_state()
+        self.scaler = cfg["scaler"]
+        self.log.info(
+            "Preprocessing frozen from the pretrained model "
+            f"(quantile, fitted on {self.scaler.n_samples_fit_:,} rows)"
+        )
+
+        def _clean(df: pd.DataFrame) -> pd.DataFrame:
+            feat = df[self._feature_cols].replace([np.inf, -np.inf], np.nan)
+            return feat.fillna(self.config.fill_value)
+
+        # Values past the outer knots all map to the same score: a high share
+        # means the new traffic outgrew the old preprocessing.
+        ref = self.benign_train if len(self.benign_train) else self.test_df
+        train_feat = _clean(ref)
+        rows = [
+            (
+                col,
+                float((train_feat[col] < kx[0]).mean()),
+                float((train_feat[col] > kx[-1]).mean()),
+            )
+            for col, kx in zip(self._feature_cols, self.scaler.knots_x_)
+        ]
+        rows.sort(key=lambda r: -(r[1] + r[2]))
+        self.log.info(
+            f"{'Scored' if self.score_mode else 'New train'} data outside the "
+            "frozen quantile range (the pretrained train data had none):\n"
+            + "\n".join(
+                f"  {c:<22} below={b:7.2%}  above={a:7.2%}" for c, b, a in rows[:10]
+            )
+        )
+
+        self._apply_scaler(train_feat, _clean(self.benign_val), _clean(self.test_df))
+        self.log.info("Preprocessing completed (frozen, quantile)")
 
     def finetune_baseline(self) -> None:
         # Pretrained model (weights just loaded, not yet trained) on the new
@@ -1523,11 +1613,9 @@ class DeepAutoencoder:
         )
 
         saved = joblib.load(Path("artifacts") / "deep_ae_config.pkl")
-        saved_scaler = saved["scaler"]
-        if list(saved["feature_names"]) != list(self._feature_cols) or not (
-            np.allclose(saved_scaler.mean_, self.scaler.mean_)
-            and np.allclose(saved_scaler.scale_, self.scaler.scale_)
-        ):
+        if list(saved["feature_names"]) != list(
+            self._feature_cols
+        ) or not self._same_scaler(saved["scaler"], self.scaler):
             raise TrainingError(
                 "Preprocessing does not match artifacts/deep_ae_config.pkl "
                 "(different data or preprocessing code since training); "
@@ -1538,6 +1626,14 @@ class DeepAutoencoder:
             f"Loaded trained model from artifacts/ "
             f"(thresholds={list(self.ae_threshold)})"
         )
+
+    @staticmethod
+    def _same_scaler(a, b) -> bool:
+        if type(a) is not type(b):
+            return False
+        if isinstance(a, QuantileScaler):
+            return a.same_as(b)
+        return np.allclose(a.mean_, b.mean_) and np.allclose(a.scale_, b.scale_)
 
     def _ae_predict_feature_err(
         self, sequences: np.ndarray
@@ -1984,6 +2080,7 @@ class DeepAutoencoder:
         self.log.info(f"Saved: {model_ae_path}")
 
         config_data = {
+            "scaling": self.config.scaling,
             "scaler": self.scaler,
             "clip_params": self.clip_params,
             "encoding_dim": self.config.encoding_dim,

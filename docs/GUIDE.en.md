@@ -328,10 +328,13 @@ A public source with few rows is most likely an attacker and cheap to exclude; a
 
 | Parameter | Default | Purpose |
 |---|---|---|
+| `da.scaling` | `layered` | `layered`: log1p for skewed features, winsorize, standard scaling capped by `max_bound_z`, then clip. `quantile`: each feature's midrank CDF mapped to a standard normal, then clip; the winsorize, log1p and `max_bound_z` keys have no effect. Mantis cannot apply `quantile` yet, so `ex` refuses such a model. `ft` and `sc` use the pretrained model's scaling |
+| `da.quantile_count` | `1000` | `quantile` only: knots per feature |
+| `da.quantile_subsample` | `1000000` | `quantile` only: training rows (random sample) the knots are fitted on |
 | `da.winsorize_lower` / `da.winsorize_upper` | `0.005` / `0.995` | Quantiles used to cut extreme values |
 | `da.max_bound_z` | `4.0` | Maximum distance, in standard deviations, of a cut bound from the mean; `none` turns it off |
 | `da.tail_check_z` | `4.0` | Features whose bound is further than this many standard deviations get an extra false-positive check |
-| `da.clip_min` / `da.clip_max` | `-5.0` / `5.0` | Clip range after scaling |
+| `da.clip_min` / `da.clip_max` | `-6.0` / `6.0` | Clip range after scaling |
 | `da.fill_value` | `0.0` | Replacement for missing values |
 
 **Analysis (`fa`, `sc`, and the reports at the end of `da` / `ft`)**
